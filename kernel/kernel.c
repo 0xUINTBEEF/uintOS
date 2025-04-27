@@ -5,6 +5,11 @@
 #include "task.h"
 #include "task1.h"
 #include "lapic.h"
+#include "keyboard.h"
+#include "shell.h"
+#include "../filesystem/fat12.h"
+#include "../memory/paging.h"
+#include "../memory/heap.h"
 
 // Paging structures
 #define PAGE_SIZE 4096
@@ -64,14 +69,39 @@ void kernel_entry() {
   set_data_segment(0x10);
   set_stack_segment(0x10);
   set_graphics_segment(0x28);
+  
+  // Initialize our new components
+  keyboard_init();
+  heap_init();
+  
+  // Welcome message
+  display_character('W', 15);
+  display_character('e', 15);
+  display_character('l', 15);
   display_character('c', 15);
+  display_character('o', 15);
+  display_character('m', 15);
+  display_character('e', 15);
+  display_character(' ', 15);
+  display_character('t', 15);
+  display_character('o', 15);
+  display_character(' ', 15);
+  display_character('u', 15);
+  display_character('i', 15);
+  display_character('n', 15);
+  display_character('t', 15);
+  display_character('O', 15);
+  display_character('S', 15);
+  display_character('\n', 15);
 
-  // Enable LAPIC timer with periodic mode for testing purposes.
+  // Enable LAPIC timer with periodic mode for task switching
   enable_lapic_timer(TIMER_PERIODIC, 0x100, TIMER_DIV_128, 32);
 
-  // Infinite loop to test LAPIC timer functionality.
-  for (;;) {}
+  // Start the shell (this will run in a loop)
+  shell_init();
+  shell_run();
 
+  // We should never reach here due to the shell's infinite loop
   START_TASK(task1);
   EXECUTE_TASK(task1);
 }
@@ -81,13 +111,29 @@ void gdb_stub() {
 }
 
 void kernel_main() {
+    // Initialize memory management
+    paging_init();
+
+    // Initialize heap memory management
+    heap_init();
+
+    // Initialize file system
+    fat12_init();
+
     // Initialize hardware and kernel subsystems
     initialize_gdt();
     initialize_idt();
     initialize_paging();
+    
+    // Initialize keyboard driver
+    keyboard_init();
+    
+    // Initialize shell interface
+    shell_init();
 
-    // Trigger GDB stub for debugging
-    gdb_stub();
-
-    // ...existing code...
+    // Trigger GDB stub for debugging if needed
+    // gdb_stub();
+    
+    // Start the shell
+    shell_run();
 }

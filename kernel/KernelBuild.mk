@@ -8,6 +8,12 @@ COMPILER_FLAGS+=-fno-builtin -masm=intel -m32 -nostdlib -gdwarf-2 -ggdb3 -save-t
 SOURCE_FILES := gdt.c io.c irq.c task.c lapic.c task1.c kernel.c
 OBJECT_FILES := $(patsubst %.c, $(BUILD_OUTPUT)/kern/%.o, $(SOURCE_FILES))
 
+# Add filesystem and memory management to kernel build
+FILESYSTEM_SRC := $(FILESYSTEM_DIR)/fat12.c
+MEMORY_SRC := $(MEMORY_DIR)/paging.c
+
+KERNEL_SRC += $(FILESYSTEM_SRC) $(MEMORY_SRC)
+
 all: $(KERNEL_BINARY)
 	@echo "Compiling kernel source files: $(SOURCE_FILES)"
 	@echo "Generated object files: $(OBJECT_FILES)"

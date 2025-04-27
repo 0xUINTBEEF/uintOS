@@ -10,6 +10,13 @@ CROSS_COMPILE ?= i686-elf-
 CC = $(CROSS_COMPILE)gcc
 LD = $(CROSS_COMPILE)ld
 
+# Add filesystem and memory management modules
+FILESYSTEM_DIR := filesystem
+MEMORY_DIR := memory
+
+include $(FILESYSTEM_DIR)/FileSystemBuild.mk
+include $(MEMORY_DIR)/MemoryBuild.mk
+
 all: build_dir disk
 
 build_dir:
