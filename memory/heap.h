@@ -11,6 +11,9 @@ void free(void *ptr);
 void *realloc(void *ptr, size_t size);
 void *calloc(size_t num, size_t size);
 
+// Memory validation function
+int is_valid_heap_pointer(void *ptr);
+
 // Memory statistics
 typedef struct {
     size_t total_memory;

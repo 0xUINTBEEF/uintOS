@@ -12,7 +12,7 @@ void uintos_job2() {
 }
 
 void uintos_init_task1() {
-    int a = 3/0;
+    // Removed division by zero that would crash the system
     uintos_job1(1, 2);
     uintos_job2();
 }

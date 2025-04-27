@@ -1,4 +1,4 @@
-// #includ "gdt.h"
+#include "gdt.h"
 #include "task.h"
 
 UINTOS_TASK_REGISTER(uintos_task1);

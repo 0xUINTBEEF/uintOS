@@ -122,6 +122,34 @@ extern struct uintos_tss uintos_init_tss;
         asm("jmp FAR PTR  [esp]");                                            \
     }
 
+// Task information structure for status reporting
+typedef struct {
+    int id;                  // Task ID
+    unsigned int state;      // Current state (UNUSED, READY, RUNNING)
+    unsigned int stack_size; // Size of the task's stack
+    const char* name;        // Task name (or "Unknown")
+    int is_current;          // Whether this is the currently running task
+} task_info_t;
+
+// Enhanced task management APIs
+void set_task_name(int task_id, const char *name);
+const char *get_task_name(int task_id);
+int get_task_count(void);
+int get_current_task_id(void);
+int get_task_info(int task_id, task_info_t *info);
+int create_named_task(void (*entry_point)(), const char *name);
+
+// Basic task management functions for the simple scheduler
+void create_task(void (*entry_point)());
+void switch_task();
+void initialize_multitasking();
+void set_task_switching(unsigned int enabled);
+
+// Task state definitions
+#define TASK_STATE_UNUSED 0
+#define TASK_STATE_READY 1
+#define TASK_STATE_RUNNING 2
+
 #define UINTOS_INIT_TASK(name) name ## _init()
 #define UINTOS_RUN_TASK(name) name ## _start()
 #define UINTOS_TASK_END(name) void __UINTOS_TASK_END_##name() {}

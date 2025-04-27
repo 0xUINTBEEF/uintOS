@@ -19,7 +19,11 @@ void cmd_help(int argc, char *argv[]);
 void cmd_clear(int argc, char *argv[]);
 void cmd_echo(int argc, char *argv[]);
 void cmd_meminfo(int argc, char *argv[]);
+void cmd_memstat(int argc, char *argv[]);
+void cmd_memtest(int argc, char *argv[]);
 void cmd_taskinfo(int argc, char *argv[]);
 void cmd_reboot(int argc, char *argv[]);
+void cmd_ls(int argc, char *argv[]);
+void cmd_cat(int argc, char *argv[]);
 
 #endif // SHELL_H

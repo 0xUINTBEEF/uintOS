@@ -4,6 +4,7 @@
 #include "asm.h"
 #include "task.h"
 #include "task1.h"
+#include "task2.h"
 #include "lapic.h"
 #include "keyboard.h"
 #include "shell.h"
@@ -95,7 +96,7 @@ void kernel_entry() {
   display_character('\n', 15);
 
   // Enable LAPIC timer with periodic mode for task switching
-  enable_lapic_timer(TIMER_PERIODIC, 0x100, TIMER_DIV_128, 32);
+  uintos_lapic_enable_timer(UINTOS_TIMER_PERIODIC, 0x100, UINTOS_TIMER_DIV_128, 32);
 
   // Start the shell (this will run in a loop)
   shell_init();
@@ -112,8 +113,8 @@ void gdb_stub() {
 
 void kernel_main() {
     // Initialize memory management
-    paging_init();
-
+    initialize_paging();
+    
     // Initialize heap memory management
     heap_init();
 
@@ -121,19 +122,26 @@ void kernel_main() {
     fat12_init();
 
     // Initialize hardware and kernel subsystems
-    initialize_gdt();
-    initialize_idt();
-    initialize_paging();
+    initialize_gdt(&initial_task_state);
+    uintos_initialize_interrupts();
+    initialize_multitasking();
     
-    // Initialize keyboard driver
+    // Initialize keyboard driver with improved handling
     keyboard_init();
+    keyboard_flush(); // Clear any pending keys
     
-    // Initialize shell interface
+    // Create system tasks with the new named task API
+    create_named_task(idle_task, "System Idle");
+    create_named_task(counter_task, "Background Counter");
+    
+    // Initialize shell interface with the enhanced filesystem commands
     shell_init();
 
-    // Trigger GDB stub for debugging if needed
-    // gdb_stub();
+    // Print welcome message
+    shell_println("uintOS (April 2025) - Enhanced Kernel");
+    shell_println("Memory, filesystem, and task subsystems initialized");
+    shell_println("Type 'help' for a list of available commands");
     
-    // Start the shell
+    // Start the shell - this will run in a loop
     shell_run();
 }

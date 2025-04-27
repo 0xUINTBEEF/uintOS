@@ -5,6 +5,7 @@
 #define HEAP_START 0x500000    // 5 MB mark
 #define HEAP_SIZE  0x100000    // 1 MB heap size
 #define BLOCK_MAGIC 0xDEADBEEF // Magic number to identify valid blocks
+#define BLOCK_FOOTER_MAGIC 0xBEEFDEAD // Magic number for block footer
 
 // Memory block header
 typedef struct block_header {
@@ -14,6 +15,13 @@ typedef struct block_header {
     struct block_header *next;    // Pointer to the next block
     struct block_header *prev;    // Pointer to the previous block
 } block_header_t;
+
+// Memory block footer for additional validation
+typedef struct block_footer {
+    uint32_t magic;               // Magic number for validation
+    size_t size;                  // Copy of block size for validation
+    const block_header_t *header; // Pointer to header for cross-validation
+} block_footer_t;
 
 // Heap statistics
 static heap_stats_t heap_statistics = {
@@ -26,39 +34,90 @@ static heap_stats_t heap_statistics = {
 // Pointer to the first block in the heap
 static block_header_t *heap_start = NULL;
 
+// Helper function to get the footer for a block
+static block_footer_t *get_footer(block_header_t *header) {
+    if (!header) return NULL;
+    return (block_footer_t*)((uint8_t*)header + sizeof(block_header_t) + header->size);
+}
+
+// Helper function to set up a block footer
+static void set_footer(block_header_t *header) {
+    if (!header) return;
+    block_footer_t *footer = get_footer(header);
+    footer->magic = BLOCK_FOOTER_MAGIC;
+    footer->size = header->size;
+    footer->header = header;
+}
+
 // Initialize the heap
 void heap_init(void) {
     // Set up the initial heap block
     heap_start = (block_header_t*)HEAP_START;
     heap_start->magic = BLOCK_MAGIC;
-    heap_start->size = HEAP_SIZE - sizeof(block_header_t);
+    // Account for footer size in available space
+    heap_start->size = HEAP_SIZE - sizeof(block_header_t) - sizeof(block_footer_t);
     heap_start->is_free = 1;
     heap_start->next = NULL;
     heap_start->prev = NULL;
     
+    // Set up initial block footer
+    set_footer(heap_start);
+    
     // Update statistics
     heap_statistics.total_memory = HEAP_SIZE;
-    heap_statistics.free_memory = HEAP_SIZE - sizeof(block_header_t);
-    heap_statistics.used_memory = sizeof(block_header_t);
+    heap_statistics.free_memory = heap_start->size;
+    heap_statistics.used_memory = sizeof(block_header_t) + sizeof(block_footer_t);
     heap_statistics.allocation_count = 0;
+}
+
+// Validate a block's integrity
+static int validate_block(block_header_t *block) {
+    if (!block) return 0;
+    
+    // Check header magic
+    if (block->magic != BLOCK_MAGIC) return 0;
+    
+    // Check footer if present
+    block_footer_t *footer = get_footer(block);
+    if (!footer) return 0;
+    
+    // Validate footer
+    if (footer->magic != BLOCK_FOOTER_MAGIC) return 0;
+    if (footer->size != block->size) return 0;
+    if (footer->header != block) return 0;
+    
+    return 1; // Block is valid
 }
 
 // Split a block if it's too large for the requested size
 static void split_block(block_header_t *block, size_t size) {
+    // Minimum size for a new block = header + footer + minimum payload
+    size_t min_fragment = sizeof(block_header_t) + sizeof(block_footer_t) + 32;
+    
     // Only split if the block is significantly larger than needed
-    if (block->size > size + sizeof(block_header_t) + 32) { // 32 bytes minimum fragment size
-        block_header_t *new_block = (block_header_t*)((uint8_t*)block + sizeof(block_header_t) + size);
+    if (block->size > size + min_fragment) {
+        block_header_t *new_block = (block_header_t*)((uint8_t*)block + 
+                                     sizeof(block_header_t) + size + sizeof(block_footer_t));
+        
+        // Calculate the new block size
+        size_t new_size = block->size - size - sizeof(block_header_t) - sizeof(block_footer_t);
         
         // Set up the new block
         new_block->magic = BLOCK_MAGIC;
-        new_block->size = block->size - size - sizeof(block_header_t);
+        new_block->size = new_size;
         new_block->is_free = 1;
         new_block->next = block->next;
         new_block->prev = block;
         
+        // Set footer for the new block
+        set_footer(new_block);
+        
         // Update the original block
         block->size = size;
         block->next = new_block;
+        
+        // Update the footer for the original block
+        set_footer(block);
         
         // Update the next block's prev pointer
         if (new_block->next) {
@@ -66,8 +125,8 @@ static void split_block(block_header_t *block, size_t size) {
         }
         
         // Update statistics
-        heap_statistics.free_memory -= sizeof(block_header_t);
-        heap_statistics.used_memory += sizeof(block_header_t);
+        heap_statistics.free_memory -= (sizeof(block_header_t) + sizeof(block_footer_t));
+        heap_statistics.used_memory += (sizeof(block_header_t) + sizeof(block_footer_t));
     }
 }
 
@@ -76,6 +135,12 @@ static block_header_t *find_free_block(size_t size) {
     block_header_t *current = heap_start;
     
     while (current) {
+        // Validate the block before using it
+        if (!validate_block(current)) {
+            // Block corruption detected - could log or panic here
+            return NULL;
+        }
+        
         // Check if block is free and large enough
         if (current->is_free && current->size >= size) {
             return current;
@@ -91,19 +156,35 @@ static void merge_free_blocks(void) {
     block_header_t *current = heap_start;
     
     while (current && current->next) {
+        // Validate blocks before merging
+        if (!validate_block(current) || !validate_block(current->next)) {
+            // Block corruption detected - could log or panic here
+            return;
+        }
+        
         if (current->is_free && current->next->is_free) {
-            // Merge with next block
-            current->size += sizeof(block_header_t) + current->next->size;
-            current->next = current->next->next;
+            // Calculate total size including the next block's header and footer
+            size_t total_size = current->size + sizeof(block_header_t) + 
+                                current->next->size + sizeof(block_footer_t);
+            
+            // Save reference to next block's next pointer
+            block_header_t *next_next = current->next->next;
+            
+            // Update current block's size and next pointer
+            current->size = total_size;
+            current->next = next_next;
+            
+            // Update footer for the merged block
+            set_footer(current);
             
             // Update next block's prev pointer if it exists
-            if (current->next) {
-                current->next->prev = current;
+            if (next_next) {
+                next_next->prev = current;
             }
             
             // Update statistics
-            heap_statistics.free_memory += sizeof(block_header_t);
-            heap_statistics.used_memory -= sizeof(block_header_t);
+            heap_statistics.free_memory += (sizeof(block_header_t) + sizeof(block_footer_t));
+            heap_statistics.used_memory -= (sizeof(block_header_t) + sizeof(block_footer_t));
             
             // Continue from the same block to check for more merges
             continue;
@@ -148,7 +229,10 @@ void free(void *ptr) {
     block_header_t *block = (block_header_t*)((uint8_t*)ptr - sizeof(block_header_t));
     
     // Validate the block
-    if (block->magic != BLOCK_MAGIC) return;
+    if (!validate_block(block)) return;
+    
+    // Check for double free
+    if (block->is_free) return;
     
     // Mark the block as free
     block->is_free = 1;
@@ -160,6 +244,23 @@ void free(void *ptr) {
     
     // Attempt to merge adjacent free blocks
     merge_free_blocks();
+}
+
+// Memory copy helper function
+static void mem_copy(void *dest, const void *src, size_t n) {
+    uint8_t *d = (uint8_t*)dest;
+    const uint8_t *s = (const uint8_t*)src;
+    for (size_t i = 0; i < n; i++) {
+        d[i] = s[i];
+    }
+}
+
+// Memory set helper function
+static void mem_set(void *dest, int val, size_t n) {
+    uint8_t *d = (uint8_t*)dest;
+    for (size_t i = 0; i < n; i++) {
+        d[i] = (uint8_t)val;
+    }
 }
 
 // Reallocate memory block
@@ -174,7 +275,7 @@ void *realloc(void *ptr, size_t size) {
     block_header_t *block = (block_header_t*)((uint8_t*)ptr - sizeof(block_header_t));
     
     // Validate the block
-    if (block->magic != BLOCK_MAGIC) return NULL;
+    if (!validate_block(block)) return NULL;
     
     // Align size to 8 bytes
     size = (size + 7) & ~7;
@@ -186,18 +287,26 @@ void *realloc(void *ptr, size_t size) {
         return ptr;
     }
     
-    // If the next block is free and has enough space
-    if (block->next && block->next->is_free && 
-        (block->size + sizeof(block_header_t) + block->next->size) >= size) {
+    // Check if we can merge with the next block if it's free
+    if (block->next && validate_block(block->next) && block->next->is_free && 
+        (block->size + sizeof(block_header_t) + sizeof(block_footer_t) + block->next->size) >= size) {
         
-        // Merge with the next block
-        block->size += sizeof(block_header_t) + block->next->size;
+        // Combine with the next block
+        size_t new_size = block->size + sizeof(block_header_t) + sizeof(block_footer_t) + block->next->size;
+        block->size = new_size;
         block->next = block->next->next;
-        if (block->next) block->next->prev = block;
+        
+        // Update the footer
+        set_footer(block);
+        
+        // Update the next block's prev pointer if it exists
+        if (block->next) {
+            block->next->prev = block;
+        }
         
         // Update statistics
-        heap_statistics.free_memory -= sizeof(block_header_t);
-        heap_statistics.used_memory += sizeof(block_header_t);
+        heap_statistics.free_memory -= (sizeof(block_header_t) + sizeof(block_footer_t));
+        heap_statistics.used_memory += (sizeof(block_header_t) + sizeof(block_footer_t));
         
         // Split if necessary
         split_block(block, size);
@@ -209,10 +318,8 @@ void *realloc(void *ptr, size_t size) {
     void *new_ptr = malloc(size);
     if (!new_ptr) return NULL;
     
-    // Copy the data to the new block
-    for (size_t i = 0; i < block->size; i++) {
-        ((uint8_t*)new_ptr)[i] = ((uint8_t*)ptr)[i];
-    }
+    // Copy the data to the new block using our helper
+    mem_copy(new_ptr, ptr, block->size);
     
     // Free the old block
     free(ptr);
@@ -222,14 +329,17 @@ void *realloc(void *ptr, size_t size) {
 
 // Allocate and zero-initialize memory
 void *calloc(size_t num, size_t size) {
+    // Check for overflow in multiplication
+    if (num > 0 && size > SIZE_MAX / num) {
+        return NULL; // Overflow
+    }
+    
     size_t total_size = num * size;
     void *ptr = malloc(total_size);
     
     if (ptr) {
-        // Zero out the allocated memory
-        for (size_t i = 0; i < total_size; i++) {
-            ((uint8_t*)ptr)[i] = 0;
-        }
+        // Zero out the allocated memory using our helper
+        mem_set(ptr, 0, total_size);
     }
     
     return ptr;
@@ -240,4 +350,24 @@ void heap_get_stats(heap_stats_t *stats) {
     if (stats) {
         *stats = heap_statistics;
     }
+}
+
+// Check if a pointer is valid (allocated by our heap)
+int is_valid_heap_pointer(void *ptr) {
+    if (!ptr || !heap_start) return 0;
+    
+    // Check if the pointer is within the heap bounds
+    if (ptr < (void*)HEAP_START || ptr >= (void*)(HEAP_START + HEAP_SIZE)) {
+        return 0;
+    }
+    
+    // Get the potential header
+    block_header_t *block = (block_header_t*)((uint8_t*)ptr - sizeof(block_header_t));
+    
+    // Validate the block and check if it's allocated
+    if (!validate_block(block) || block->is_free) {
+        return 0;
+    }
+    
+    return 1; // Valid allocated pointer
 }
