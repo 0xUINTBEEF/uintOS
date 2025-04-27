@@ -1,0 +1,15 @@
+# Ignore build artifacts
+build/
+disk.img
+qemu.log
+
+# Ignore temporary files
+*.o
+*.tmp
+*.swp
+*.swo
+
+# Ignore editor-specific files
+.vscode/
+.idea/
+*.iml
