@@ -8,6 +8,7 @@
 #include "lapic.h"
 #include "keyboard.h"
 #include "shell.h"
+#include "vga.h"
 #include "../filesystem/fat12.h"
 #include "../memory/paging.h"
 #include "../memory/heap.h"
@@ -111,6 +112,93 @@ void gdb_stub() {
     asm volatile("int3"); // Trigger a breakpoint interrupt for GDB
 }
 
+// VGA demo function to show graphical capabilities
+void vga_demo() {
+    // Save current color
+    uint8_t old_color = vga_current_color;
+    
+    // Clear screen with blue background
+    vga_set_color(vga_entry_color(VGA_COLOR_WHITE, VGA_COLOR_BLUE));
+    vga_clear_screen();
+    
+    // Draw a title
+    vga_set_color(vga_entry_color(VGA_COLOR_YELLOW, VGA_COLOR_BLUE));
+    vga_write_string_at("uintOS VGA Demo", 30, 1);
+    
+    // Draw some boxes with different colors
+    vga_draw_box(5, 3, 25, 10, vga_entry_color(VGA_COLOR_WHITE, VGA_COLOR_BLUE));
+    vga_draw_window(30, 3, 50, 10, "Info", vga_entry_color(VGA_COLOR_CYAN, VGA_COLOR_BLUE), 
+                   vga_entry_color(VGA_COLOR_BLACK, VGA_COLOR_CYAN));
+    vga_draw_window(55, 3, 75, 10, "Help", vga_entry_color(VGA_COLOR_GREEN, VGA_COLOR_BLUE), 
+                   vga_entry_color(VGA_COLOR_BLACK, VGA_COLOR_GREEN));
+    
+    // Add some text inside boxes
+    vga_write_string_at("File Explorer", 10, 5);
+    vga_set_color(vga_entry_color(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLUE));
+    vga_write_string_at("Documents", 8, 7);
+    vga_write_string_at("Pictures", 8, 8);
+    vga_write_string_at("Settings", 8, 9);
+    
+    vga_set_color(vga_entry_color(VGA_COLOR_WHITE, VGA_COLOR_BLUE));
+    vga_write_string_at("System Info:", 33, 5);
+    vga_set_color(vga_entry_color(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLUE));
+    vga_write_string_at("CPU: 1x86", 33, 6);
+    vga_write_string_at("RAM: 16 MB", 33, 7);
+    vga_write_string_at("OS: uintOS v1.0", 33, 8);
+    vga_write_string_at("Date: April 2025", 33, 9);
+    
+    vga_set_color(vga_entry_color(VGA_COLOR_WHITE, VGA_COLOR_BLUE));
+    vga_write_string_at("Keyboard Shortcuts:", 58, 5);
+    vga_set_color(vga_entry_color(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLUE));
+    vga_write_string_at("F1 - Help", 58, 6);
+    vga_write_string_at("F2 - Menu", 58, 7);
+    vga_write_string_at("F3 - Search", 58, 8);
+    vga_write_string_at("ESC - Exit", 58, 9);
+    
+    // Draw a progress bar
+    vga_draw_horizontal_line(20, 12, 40, vga_entry_color(VGA_COLOR_DARK_GREY, VGA_COLOR_BLUE));
+    vga_draw_horizontal_line(20, 12, 28, vga_entry_color(VGA_COLOR_GREEN, VGA_COLOR_BLUE));
+    vga_write_string_at("System Loading... 70%", 28, 14);
+    
+    // Add a footer
+    vga_set_color(vga_entry_color(VGA_COLOR_BLACK, VGA_COLOR_LIGHT_GREY));
+    for (int i = 0; i < VGA_WIDTH; i++) {
+        vga_buffer[24 * VGA_WIDTH + i] = vga_entry(' ', vga_current_color);
+    }
+    vga_write_string_at("Press any key to continue to shell...", 22, 24);
+    
+    // Wait for a keypress
+    while (!is_key_available()) {
+        // Simple animation for the progress bar
+        static int progress = 0;
+        static int direction = 1;
+        
+        // Erase old progress indicator
+        vga_draw_horizontal_line(20, 12, 40, vga_entry_color(VGA_COLOR_DARK_GREY, VGA_COLOR_BLUE));
+        
+        // Update progress
+        progress += direction;
+        if (progress >= 40) {
+            direction = -1;
+        } else if (progress <= 0) {
+            direction = 1;
+        }
+        
+        // Draw new progress
+        vga_draw_horizontal_line(20, 12, progress, vga_entry_color(VGA_COLOR_GREEN, VGA_COLOR_BLUE));
+        
+        // Small delay
+        for (volatile int i = 0; i < 500000; i++);
+    }
+    
+    // Clear keypress
+    keyboard_read_key();
+    
+    // Restore original color
+    vga_set_color(old_color);
+    vga_clear_screen();
+}
+
 void kernel_main() {
     // Initialize memory management
     initialize_paging();
@@ -118,6 +206,12 @@ void kernel_main() {
     // Initialize heap memory management
     heap_init();
 
+    // Initialize VGA before anything else that displays text
+    vga_init();
+    
+    // Display a nice VGA demo
+    vga_demo();
+    
     // Initialize file system
     fat12_init();
 
@@ -137,10 +231,12 @@ void kernel_main() {
     // Initialize shell interface with the enhanced filesystem commands
     shell_init();
 
-    // Print welcome message
-    shell_println("uintOS (April 2025) - Enhanced Kernel");
-    shell_println("Memory, filesystem, and task subsystems initialized");
-    shell_println("Type 'help' for a list of available commands");
+    // Print welcome message using VGA functions
+    vga_set_color(vga_entry_color(VGA_COLOR_GREEN, VGA_COLOR_BLACK));
+    vga_write_string("uintOS (April 2025) - Enhanced Kernel with VGA Support\n");
+    vga_set_color(vga_entry_color(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK));
+    vga_write_string("Memory, filesystem, task and VGA subsystems initialized\n");
+    vga_write_string("Type 'help' for a list of available commands\n\n");
     
     // Start the shell - this will run in a loop
     shell_run();

@@ -5,7 +5,7 @@ COMPILER_FLAGS=-Wall -Wno-format
 COMPILER_FLAGS+=-fno-stack-protector -fno-omit-frame-pointer -fno-asynchronous-unwind-tables
 COMPILER_FLAGS+=-fno-builtin -masm=intel -m32 -nostdlib -gdwarf-2 -ggdb3 -save-temps
 
-SOURCE_FILES := gdt.c io.c irq.c task.c lapic.c task1.c keyboard.c shell.c kernel.c
+SOURCE_FILES := gdt.c io.c irq.c task.c lapic.c task1.c keyboard.c shell.c vga.c task2.c kernel.c
 OBJECT_FILES := $(patsubst %.c, $(BUILD_OUTPUT)/kern/%.o, $(SOURCE_FILES))
 
 # Add filesystem and memory management to kernel build

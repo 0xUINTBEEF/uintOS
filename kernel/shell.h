@@ -25,5 +25,6 @@ void cmd_taskinfo(int argc, char *argv[]);
 void cmd_reboot(int argc, char *argv[]);
 void cmd_ls(int argc, char *argv[]);
 void cmd_cat(int argc, char *argv[]);
+void cmd_vgademo(int argc, char *argv[]);
 
 #endif // SHELL_H

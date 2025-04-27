@@ -1,8 +1,10 @@
 #include "shell.h"
 #include "keyboard.h"
 #include "io.h"
+#include "vga.h"
 #include "../memory/paging.h"
 #include "../filesystem/fat12.h"
+#include "../memory/heap.h"
 #include "task.h"
 
 // ANSI color codes
@@ -80,12 +82,8 @@ static void int_to_string(int value, char *str) {
 
 // Shell I/O functions
 void shell_print(const char *str) {
-    while (*str) {
-        // Simple implementation: write the character to the screen
-        // In a real implementation, this would use a terminal driver
-        display_character(*str, 15); // Assuming display_character is defined elsewhere
-        str++;
-    }
+    // Use VGA driver instead of direct display
+    vga_write_string(str);
 }
 
 void shell_println(const char *str) {
@@ -94,7 +92,27 @@ void shell_println(const char *str) {
 }
 
 void shell_display_prompt() {
-    shell_print(COLOR_GREEN "uintOS" COLOR_RESET ":" COLOR_BLUE "~$ " COLOR_RESET);
+    // Save the current color
+    uint8_t old_color = vga_current_color;
+    
+    // Display username in green
+    vga_set_color(vga_entry_color(VGA_COLOR_GREEN, VGA_COLOR_BLACK));
+    shell_print("uintOS");
+    
+    // Display divider in white
+    vga_set_color(vga_entry_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK));
+    shell_print(":");
+    
+    // Display path in blue
+    vga_set_color(vga_entry_color(VGA_COLOR_BLUE, VGA_COLOR_BLACK));
+    shell_print("~");
+    
+    // Display prompt in white
+    vga_set_color(vga_entry_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK));
+    shell_print("$ ");
+    
+    // Restore the original color
+    vga_set_color(old_color);
 }
 
 // Process a key input in the shell
@@ -191,6 +209,8 @@ void shell_execute_command(const char *command) {
             cmd_ls(argc, argv);
         } else if (strcmp(argv[0], "cat") == 0) {
             cmd_cat(argc, argv);
+        } else if (strcmp(argv[0], "vgademo") == 0) {
+            cmd_vgademo(argc, argv);
         } else {
             shell_println("Unknown command. Type 'help' for a list of commands.");
         }
@@ -215,15 +235,12 @@ void cmd_help(int argc, char *argv[]) {
     shell_println("  memtest  - Run memory allocation tests");
     shell_println("  taskinfo - Display task information");
     shell_println("  reboot   - Reboot the system");
+    shell_println("  vgademo  - Run VGA demonstration");
 }
 
 void cmd_clear(int argc, char *argv[]) {
-    // Simple implementation: fill screen with spaces
-    for (int i = 0; i < 25 * 80; i++) {
-        display_character(' ', 0);
-    }
-    // Reset cursor position
-    // In a real implementation, we would have proper cursor management
+    // Use the VGA driver to clear the screen
+    vga_clear_screen();
 }
 
 void cmd_echo(int argc, char *argv[]) {
@@ -466,8 +483,6 @@ void cmd_cat(int argc, char *argv[]) {
 
 // Enhanced memory statistics command
 void cmd_memstat(int argc, char *argv[]) {
-    #include "../memory/heap.h"
-    
     heap_stats_t stats;
     heap_get_stats(&stats);
     
@@ -519,8 +534,6 @@ void cmd_memstat(int argc, char *argv[]) {
 
 // Memory testing command
 void cmd_memtest(int argc, char *argv[]) {
-    #include "../memory/heap.h"
-    
     shell_println("=== Memory Allocation Test ===");
     
     // Store pointers to allocated memory
@@ -638,4 +651,10 @@ void cmd_memtest(int argc, char *argv[]) {
     } else {
         shell_println("\nMemory tests completed with errors!");
     }
+}
+
+void cmd_vgademo(int argc, char *argv[]) {
+    // Run the VGA demonstration
+    extern void vga_demo();
+    vga_demo();
 }
