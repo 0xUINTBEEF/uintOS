@@ -12,6 +12,7 @@
 #include "../filesystem/fat12.h"
 #include "../memory/paging.h"
 #include "../memory/heap.h"
+#include "../hal/include/hal.h"  // Include the HAL header
 
 // Paging structures
 #define PAGE_SIZE 4096
@@ -206,8 +207,21 @@ void kernel_main() {
     // Initialize heap memory management
     heap_init();
 
-    // Initialize VGA before anything else that displays text
-    vga_init();
+    // Initialize Hardware Abstraction Layer
+    int hal_status = hal_initialize();
+    if (hal_status != 0) {
+        // HAL initialization failed, fall back to direct hardware access
+        vga_init();
+        vga_set_color(vga_entry_color(VGA_COLOR_RED, VGA_COLOR_BLACK));
+        vga_write_string("Warning: HAL initialization failed, falling back to direct hardware access\n");
+        vga_set_color(vga_entry_color(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK));
+    } else {
+        // HAL initialized successfully
+        vga_init();
+        vga_set_color(vga_entry_color(VGA_COLOR_GREEN, VGA_COLOR_BLACK));
+        vga_write_string("HAL initialized successfully\n");
+        vga_set_color(vga_entry_color(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK));
+    }
     
     // Display a nice VGA demo
     vga_demo();
