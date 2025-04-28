@@ -29,7 +29,9 @@ static heap_stats_t heap_statistics = {
     .total_memory = 0,
     .used_memory = 0,
     .free_memory = 0,
-    .allocation_count = 0
+    .allocation_count = 0,
+    .peak_usage = 0,
+    .failed_allocs = 0
 };
 
 // Flag to track if heap is already initialized
@@ -37,6 +39,9 @@ static int heap_initialized = 0;
 
 // Pointer to the first block in the heap
 static block_header_t *heap_start = NULL;
+
+// Current heap end address
+static uintptr_t heap_end = 0;
 
 // Helper function to get the footer for a block
 static block_footer_t *get_footer(block_header_t *header) {
@@ -56,28 +61,88 @@ static void set_footer(block_header_t *header) {
     footer->checksum = footer->magic ^ footer->size ^ (uintptr_t)footer->header;
 }
 
+// Expand the heap by requesting more pages from the paging system
+void heap_expand(size_t additional_size) {
+    // Round up to page boundary
+    size_t pages_needed = (additional_size + PAGE_SIZE - 1) / PAGE_SIZE;
+    
+    // Request pages from the paging system
+    void *new_memory = allocate_pages(pages_needed);
+    if (!new_memory) return; // Failed to allocate pages
+    
+    size_t new_size = pages_needed * PAGE_SIZE;
+    
+    if (heap_end == 0) {
+        // This is the initial allocation
+        heap_start = (block_header_t*)new_memory;
+        heap_start->magic = BLOCK_MAGIC;
+        heap_start->size = new_size - sizeof(block_header_t) - sizeof(block_footer_t);
+        heap_start->is_free = 1;
+        heap_start->next = NULL;
+        heap_start->prev = NULL;
+        
+        // Set up initial block footer
+        set_footer(heap_start);
+        
+        // Update heap end pointer
+        heap_end = (uintptr_t)new_memory + new_size;
+        
+        // Update statistics
+        heap_statistics.total_memory = new_size;
+        heap_statistics.free_memory = heap_start->size;
+        heap_statistics.used_memory = sizeof(block_header_t) + sizeof(block_footer_t);
+    } else {
+        // This is an expansion - find the last block
+        block_header_t *last_block = heap_start;
+        while (last_block->next) {
+            last_block = last_block->next;
+        }
+        
+        // Check if the last block is free
+        if (last_block->is_free) {
+            // Extend the existing free block
+            size_t old_size = last_block->size;
+            last_block->size += new_size;
+            
+            // Update footer
+            set_footer(last_block);
+            
+            // Update statistics
+            heap_statistics.total_memory += new_size;
+            heap_statistics.free_memory += new_size;
+        } else {
+            // Create a new free block at the end
+            block_header_t *new_block = (block_header_t*)heap_end;
+            new_block->magic = BLOCK_MAGIC;
+            new_block->size = new_size - sizeof(block_header_t) - sizeof(block_footer_t);
+            new_block->is_free = 1;
+            new_block->prev = last_block;
+            new_block->next = NULL;
+            
+            // Update last block's next pointer
+            last_block->next = new_block;
+            
+            // Set up new block footer
+            set_footer(new_block);
+            
+            // Update heap end pointer
+            heap_end = heap_end + new_size;
+            
+            // Update statistics
+            heap_statistics.total_memory += new_size;
+            heap_statistics.free_memory += new_block->size;
+            heap_statistics.used_memory += (sizeof(block_header_t) + sizeof(block_footer_t));
+        }
+    }
+}
+
 // Initialize the heap
 void heap_init(void) {
     // Prevent double initialization
     if (heap_initialized) return;
     
-    // Set up the initial heap block
-    heap_start = (block_header_t*)HEAP_START;
-    heap_start->magic = BLOCK_MAGIC;
-    // Account for footer size in available space
-    heap_start->size = HEAP_SIZE - sizeof(block_header_t) - sizeof(block_footer_t);
-    heap_start->is_free = 1;
-    heap_start->next = NULL;
-    heap_start->prev = NULL;
-    
-    // Set up initial block footer
-    set_footer(heap_start);
-    
-    // Update statistics
-    heap_statistics.total_memory = HEAP_SIZE;
-    heap_statistics.free_memory = heap_start->size;
-    heap_statistics.used_memory = sizeof(block_header_t) + sizeof(block_footer_t);
-    heap_statistics.allocation_count = 0;
+    // Initialize with a default size (can be expanded later)
+    heap_expand(HEAP_SIZE);
     
     // Mark heap as initialized
     heap_initialized = 1;
@@ -228,7 +293,15 @@ void *malloc(size_t size) {
     
     // Find a free block
     block_header_t *block = find_free_block(size);
-    if (!block) return NULL; // Out of memory
+    if (!block) {
+        // Try to expand the heap if no suitable block is found
+        heap_expand(size + sizeof(block_header_t) + sizeof(block_footer_t));
+        block = find_free_block(size);
+        if (!block) {
+            heap_statistics.failed_allocs++;
+            return NULL; // Out of memory
+        }
+    }
     
     // Split the block if it's much larger than needed
     split_block(block, size);
@@ -240,6 +313,9 @@ void *malloc(size_t size) {
     heap_statistics.free_memory -= block->size;
     heap_statistics.used_memory += block->size;
     heap_statistics.allocation_count++;
+    if (heap_statistics.used_memory > heap_statistics.peak_usage) {
+        heap_statistics.peak_usage = heap_statistics.used_memory;
+    }
     
     // Return the memory address after the header
     return (void*)((uint8_t*)block + sizeof(block_header_t));
@@ -380,7 +456,7 @@ int is_valid_heap_pointer(void *ptr) {
     if (!ptr || !heap_start) return 0;
     
     // Check if the pointer is within the heap bounds
-    if (ptr < (void*)HEAP_START || ptr >= (void*)(HEAP_START + HEAP_SIZE)) {
+    if (ptr < (void*)heap_start || ptr >= (void*)heap_end) {
         return 0;
     }
     
@@ -393,4 +469,138 @@ int is_valid_heap_pointer(void *ptr) {
     }
     
     return 1; // Valid allocated pointer
+}
+
+// Dump the current heap layout for debugging purposes
+void heap_dump(void) {
+    extern void shell_print(const char* str);
+    extern void shell_println(const char* str);
+    extern void int_to_string(int num, char* str);
+    
+    shell_println("=== Heap Memory Dump ===");
+    
+    if (!heap_initialized) {
+        shell_println("Heap not initialized");
+        return;
+    }
+    
+    block_header_t *current = heap_start;
+    int block_count = 0;
+    char buffer[64];
+    
+    while (current) {
+        // Print block info
+        int_to_string(block_count++, buffer);
+        shell_print("Block #");
+        shell_print(buffer);
+        shell_print(" @ 0x");
+        
+        // Convert address to hex string - simplified version
+        uintptr_t addr = (uintptr_t)current;
+        for (int i = 7; i >= 0; i--) {
+            int digit = (addr >> (i * 4)) & 0xF;
+            buffer[7-i] = digit < 10 ? '0' + digit : 'A' + (digit - 10);
+        }
+        buffer[8] = 0;
+        shell_print(buffer);
+        
+        // Print block state
+        shell_print(" | Size: ");
+        int_to_string(current->size, buffer);
+        shell_print(buffer);
+        
+        shell_print(" | ");
+        shell_println(current->is_free ? "FREE" : "USED");
+        
+        // Validate current block
+        if (!validate_block(current)) {
+            shell_println("  WARNING: CORRUPTED BLOCK DETECTED!");
+        }
+        
+        current = current->next;
+    }
+}
+
+// Check heap integrity
+void heap_check(void) {
+    extern void shell_println(const char* str);
+    extern void int_to_string(int num, char* str);
+    
+    shell_println("=== Heap Integrity Check ===");
+    
+    if (!heap_initialized) {
+        shell_println("Heap not initialized");
+        return;
+    }
+    
+    block_header_t *current = heap_start;
+    int errors = 0;
+    char buffer[32];
+    
+    // Verify the entire heap
+    while (current) {
+        // Check block validity
+        if (!validate_block(current)) {
+            errors++;
+        }
+        
+        // Check for adjacent free blocks that should have been merged
+        if (current->is_free && current->next && current->next->is_free) {
+            shell_println("Error: Adjacent free blocks detected (merge failure)");
+            errors++;
+        }
+        
+        // Check that block pointers are consistent
+        if (current->next && current->next->prev != current) {
+            shell_println("Error: Inconsistent prev/next pointers");
+            errors++;
+        }
+        
+        // Move to next block
+        current = current->next;
+    }
+    
+    // Verify heap stats against actual heap content
+    size_t counted_used = 0;
+    size_t counted_free = 0;
+    size_t counted_overhead = 0;
+    int counted_allocs = 0;
+    
+    current = heap_start;
+    while (current) {
+        if (current->is_free) {
+            counted_free += current->size;
+        } else {
+            counted_used += current->size;
+            counted_allocs++;
+        }
+        counted_overhead += (sizeof(block_header_t) + sizeof(block_footer_t));
+        current = current->next;
+    }
+    
+    // Check for inconsistencies in statistics
+    if (counted_used != heap_statistics.used_memory - counted_overhead) {
+        shell_println("Error: Used memory statistics are inconsistent");
+        errors++;
+    }
+    
+    if (counted_free != heap_statistics.free_memory) {
+        shell_println("Error: Free memory statistics are inconsistent");
+        errors++;
+    }
+    
+    if (counted_allocs != heap_statistics.allocation_count) {
+        shell_println("Error: Allocation count is inconsistent");
+        errors++;
+    }
+    
+    // Print result
+    if (errors == 0) {
+        shell_println("Heap integrity check passed. No errors detected.");
+    } else {
+        shell_print("Heap integrity check failed with ");
+        int_to_string(errors, buffer);
+        shell_print(buffer);
+        shell_println(" errors.");
+    }
 }

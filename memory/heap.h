@@ -6,6 +6,7 @@
 
 // Heap management functions
 void heap_init(void);
+void heap_expand(size_t additional_size);  // New function to grow the heap when needed
 void *malloc(size_t size);
 void free(void *ptr);
 void *realloc(void *ptr, size_t size);
@@ -20,8 +21,14 @@ typedef struct {
     size_t used_memory;
     size_t free_memory;
     size_t allocation_count;
+    size_t peak_usage;        // Track peak memory usage
+    size_t failed_allocs;     // Track failed allocations
 } heap_stats_t;
 
 void heap_get_stats(heap_stats_t *stats);
+
+// Debug functions
+void heap_dump(void);         // Dump heap layout for debugging
+void heap_check(void);        // Verify heap integrity
 
 #endif // HEAP_H
