@@ -5,6 +5,11 @@ uintOS is a sophisticated educational operating system that demonstrates key OS 
 
 ## Features
 - **Enhanced Kernel**: Core kernel with comprehensive task management, interrupt handling, and error recovery
+- **Hardware Abstraction Layer (HAL)**: 
+  - Unified hardware interface for portability across architectures
+  - Modular design with CPU, interrupt, timer, I/O, memory, and device subsystems
+  - Architecture-specific implementations isolated from core OS code
+  - Support for multiple hardware platforms with consistent APIs
 - **Memory Management**: 
   - Paging support with virtual memory mapping
   - Advanced heap implementation with corruption detection and memory safety features
@@ -34,6 +39,12 @@ uintOS is a sophisticated educational operating system that demonstrates key OS 
   - Safe reboot mechanisms
 
 ## New Features (April 2025)
+- **Advanced Hardware Abstraction Layer (HAL)**:
+  - Complete abstraction of hardware-specific details
+  - Support for x86, x86_64 architectures with extensible design for ARM/RISC-V
+  - Centralized hardware access through standardized APIs
+  - Improved portability across different hardware platforms
+  - Device discovery and management framework
 - **VGA Graphics Support**: Added comprehensive VGA text mode support with:
   - 16 foreground and 16 background colors
   - Text-based UI elements (windows, boxes, borders)
@@ -62,6 +73,9 @@ uintOS is a sophisticated educational operating system that demonstrates key OS 
 
 ## Project Structure
 - `bootloader/`: Contains the bootloader code
+- `hal/`: Hardware Abstraction Layer implementation
+  - `include/`: HAL interface headers
+  - `src/`: Architecture-specific HAL implementations
 - `kernel/`: Contains the kernel source code and headers
   - `vga.c/h`: VGA driver implementation
   - `task.c/h`: Task management system
@@ -131,6 +145,45 @@ The task management system features:
 - Task information retrieval API
 - Task switching safety mechanisms
 
+## Hardware Abstraction Layer (HAL)
+
+The uintOS Hardware Abstraction Layer provides a unified interface between the operating system kernel and the underlying hardware, isolating hardware-specific details and enabling portability across different architectures and platforms.
+
+### HAL Components
+
+- **CPU Management**: CPU detection, feature discovery, context switching, and power management
+- **Interrupt Handling**: Unified interface for PIC, APIC, and other interrupt controllers
+- **Timer Services**: Hardware timer management with high-resolution time measurements
+- **I/O Operations**: Port I/O, memory-mapped I/O, and PCI configuration access
+- **Memory Management**: Physical and virtual memory management, MMU configuration
+- **Device Framework**: Device enumeration, classification, and driver binding
+
+### Architecture Support
+
+- **x86/x86_64**: Complete implementation with all HAL features
+- **ARM/ARM64**: Interface defined with implementation placeholders
+- **RISC-V**: Interface defined with implementation placeholders
+
+### HAL API Usage
+
+OS components interact with hardware exclusively through the HAL API, never directly accessing hardware. This ensures consistent behavior across different platforms and simplifies porting to new architectures.
+
+Example:
+```c
+// Initialize the HAL
+hal_initialize();
+
+// Read from a port (platform-independent)
+uint8_t data = hal_io_port_in8(0x60);
+
+// Write to memory-mapped I/O
+hal_io_memory_write32(0xFEC00000, 0x10);
+
+// Get CPU information
+hal_cpu_info_t cpu_info;
+hal_cpu_get_info(&cpu_info);
+```
+
 ## Build Instructions
 1. Install a cross-compiler for your target architecture.
 2. Run `make` in the root directory to build the project.
@@ -152,4 +205,4 @@ This project is licensed under the MIT License.
 
 ---
 
-*Last Updated: April 28, 2025*
+*Last Updated: April 29, 2025*

@@ -639,7 +639,6 @@ void uintos_handle_double_fault_alt(uint32_t error_code) {
     // Restore color
     vga_set_color(old_color);
     
-    // In a real OS, this would be a terminal condition requiring system reset
     // Disable interrupts and halt the CPU
     asm volatile("cli");  // Clear interrupt flag
     while (1) {
