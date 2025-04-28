@@ -48,9 +48,13 @@ uintOS is a sophisticated educational operating system that demonstrates key OS 
   - Task state tracking and reporting
   - Task information command with detailed status view
 - **Enhanced File System**:
+  - Multiple filesystem support (FAT12, ext2, ISO 9660)
   - Directory listing with file attributes
   - File content reading with error handling
   - File existence and size checking
+  - Symbolic links in ext2
+  - CD-ROM support with ISO 9660 including Joliet extensions
+  - Bootable media support with El Torito
 - **Improved Shell**:
   - Color-coded prompt and output
   - New commands for system management and diagnostics
@@ -68,6 +72,8 @@ uintOS is a sophisticated educational operating system that demonstrates key OS 
   - `heap.c/h`: Advanced heap memory management
 - `filesystem/`: File system implementation
   - `fat12.c/h`: FAT12 file system driver
+  - `ext2/`: ext2 file system driver
+  - `iso9660/`: ISO 9660 CD-ROM file system driver
 - `test/`: Contains unit tests and testing framework
 
 ## Shell Commands
