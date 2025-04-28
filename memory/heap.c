@@ -21,6 +21,7 @@ typedef struct block_footer {
     uint32_t magic;               // Magic number for validation
     size_t size;                  // Copy of block size for validation
     const block_header_t *header; // Pointer to header for cross-validation
+    uint32_t checksum;           // XOR checksum for enhanced corruption detection
 } block_footer_t;
 
 // Heap statistics
@@ -30,6 +31,9 @@ static heap_stats_t heap_statistics = {
     .free_memory = 0,
     .allocation_count = 0
 };
+
+// Flag to track if heap is already initialized
+static int heap_initialized = 0;
 
 // Pointer to the first block in the heap
 static block_header_t *heap_start = NULL;
@@ -47,10 +51,16 @@ static void set_footer(block_header_t *header) {
     footer->magic = BLOCK_FOOTER_MAGIC;
     footer->size = header->size;
     footer->header = header;
+    
+    // Add XOR checksum for enhanced corruption detection
+    footer->checksum = footer->magic ^ footer->size ^ (uintptr_t)footer->header;
 }
 
 // Initialize the heap
 void heap_init(void) {
+    // Prevent double initialization
+    if (heap_initialized) return;
+    
     // Set up the initial heap block
     heap_start = (block_header_t*)HEAP_START;
     heap_start->magic = BLOCK_MAGIC;
@@ -68,6 +78,9 @@ void heap_init(void) {
     heap_statistics.free_memory = heap_start->size;
     heap_statistics.used_memory = sizeof(block_header_t) + sizeof(block_footer_t);
     heap_statistics.allocation_count = 0;
+    
+    // Mark heap as initialized
+    heap_initialized = 1;
 }
 
 // Validate a block's integrity
@@ -86,6 +99,9 @@ static int validate_block(block_header_t *block) {
     if (footer->size != block->size) return 0;
     if (footer->header != block) return 0;
     
+    // Validate checksum
+    if (footer->checksum != (footer->magic ^ footer->size ^ (uintptr_t)footer->header)) return 0;
+    
     return 1; // Block is valid
 }
 
@@ -96,15 +112,23 @@ static void split_block(block_header_t *block, size_t size) {
     
     // Only split if the block is significantly larger than needed
     if (block->size > size + min_fragment) {
+        // Calculate the remaining size
+        size_t remaining_size = block->size - size - sizeof(block_header_t) - sizeof(block_footer_t);
+        
+        // For small memory blocks, consider fragmentation impact
+        // Don't split if remaining space is less than twice the minimum fragment size
+        // This helps reduce fragmentation with small memory blocks
+        if (remaining_size < 2 * min_fragment) {
+            // Just leave the block as is to avoid fragmentation
+            return;
+        }
+        
         block_header_t *new_block = (block_header_t*)((uint8_t*)block + 
                                      sizeof(block_header_t) + size + sizeof(block_footer_t));
         
-        // Calculate the new block size
-        size_t new_size = block->size - size - sizeof(block_header_t) - sizeof(block_footer_t);
-        
         // Set up the new block
         new_block->magic = BLOCK_MAGIC;
-        new_block->size = new_size;
+        new_block->size = remaining_size;
         new_block->is_free = 1;
         new_block->next = block->next;
         new_block->prev = block;
