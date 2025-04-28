@@ -86,15 +86,27 @@ uintOS is a sophisticated educational operating system that demonstrates key OS 
 ## VGA Features
 The VGA subsystem provides:
 - Text mode support (80x25 characters)
-- 16 foreground and 16 background colors
-- Hardware cursor manipulation
+- 16 foreground and 16 background colors with blinking text support
+- Hardware cursor manipulation with size and visibility control
 - Special character handling (newlines, tabs, backspace)
-- Scrolling support
+- Advanced scrolling with configurable regions and smooth scrolling
+- Full-screen and region-based screen clearing
+- Triple buffer support for flicker-free animations
 - Drawing primitives:
-  - Boxes with single-line borders
-  - Windows with titles
-  - Horizontal and vertical lines
-  - Positioned text rendering
+  - Boxes with single/double-line borders and custom styling
+  - Windows with titles, shadows, and interaction elements
+  - Horizontal and vertical lines with various styles (solid, dotted, dashed)
+  - Positioned text rendering with character-by-character animation
+  - Custom character set support with user-defined glyphs
+  - Color fading and transition effects
+  - Basic shape drawing (rectangles, circles)
+- Text UI components:
+  - Progress bars with customizable styling
+  - Simple menus with selection highlighting
+  - Dialog boxes with multiple options
+  - Status bars with update capabilities
+- Screen capture and restore functionality
+- Virtual terminal support with multiple screens
 
 ## Memory Management
 The enhanced heap management system provides:
@@ -134,4 +146,4 @@ This project is licensed under the MIT License.
 
 ---
 
-*Last Updated: April 27, 2025*
+*Last Updated: April 28, 2025*
