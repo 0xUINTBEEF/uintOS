@@ -528,9 +528,57 @@ UINTOS_TASK_END(uintos_irq10);
 
 UINTOS_TASK_START(uintos_irq11, uintos_handle_segment_not_present);
 void uintos_handle_segment_not_present(uint32_t error_code) {
-    // Handle segment not present error with the provided error code
+    // Enhanced error handling with detailed diagnostics
+    uint32_t selector_index = error_code & 0xFFF8;  // Extract the selector index (bits 3-15)
+    uint8_t table = (error_code & 0x0006) >> 1;     // Extract table indicator (bits 1-2)
+    uint8_t external = error_code & 0x0001;         // Extract external bit
+    
+    // If a registered handler exists, call it with the error code
     if (exception_handlers[EXC_SEGMENT_NOT_PRES]) {
         exception_handlers[EXC_SEGMENT_NOT_PRES](error_code, NULL);
+    } else {
+        // Default handler with detailed diagnostic information
+        uint8_t old_color = vga_current_color;
+        vga_set_color(vga_entry_color(VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK));
+        
+        vga_write_string("\nCPU EXCEPTION: Segment Not Present\n");
+        vga_write_string("Error Code: 0x");
+        
+        // Convert error code to hex string
+        char err_str[9];
+        for (int i = 0; i < 8; i++) {
+            uint8_t nibble = (error_code >> ((7-i) * 4)) & 0xF;
+            err_str[i] = (nibble < 10) ? ('0' + nibble) : ('A' + nibble - 10);
+        }
+        err_str[8] = 0;
+        vga_write_string(err_str);
+        vga_write_string("\n");
+        
+        // Display specific details about the error
+        vga_write_string("Selector Index: ");
+        char index_str[5];
+        for (int i = 0; i < 4; i++) {
+            uint8_t nibble = (selector_index >> ((3-i) * 4)) & 0xF;
+            index_str[i] = (nibble < 10) ? ('0' + nibble) : ('A' + nibble - 10);
+        }
+        index_str[4] = 0;
+        vga_write_string(index_str);
+        vga_write_string("\n");
+        
+        vga_write_string("Table: ");
+        switch(table) {
+            case 0: vga_write_string("GDT"); break;
+            case 2: vga_write_string("LDT"); break;
+            case 1: case 3: vga_write_string("IDT"); break;
+        }
+        vga_write_string("\n");
+        
+        vga_write_string("Source: ");
+        vga_write_string(external ? "External program" : "Processor");
+        vga_write_string("\n");
+        
+        // Restore color
+        vga_set_color(old_color);
     }
     
     UINTOS_INTERRUPT_RETURN();
@@ -539,13 +587,98 @@ UINTOS_TASK_END(uintos_irq11);
 
 UINTOS_TASK_START(uintos_irq13, uintos_handle_general_protection);
 void uintos_handle_general_protection() {
-    // Get error code using safer approach
+    // Get error code from the stack
     uint32_t error_code;
-    asm volatile("mov %0, [ebp + 4]" : "=r"(error_code) : : "memory");
+    asm volatile("mov %0, [esp + 4]" : "=r"(error_code) : : "memory");
     
-    // Handle general protection fault
+    // Handle general protection fault with detailed diagnostics
     if (exception_handlers[EXC_GENERAL_PROTECT]) {
         exception_handlers[EXC_GENERAL_PROTECT](error_code, NULL);
+    } else {
+        // Default handler with comprehensive diagnostic information
+        uint8_t old_color = vga_current_color;
+        vga_set_color(vga_entry_color(VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK));
+        
+        vga_write_string("\nCPU EXCEPTION: General Protection Fault\n");
+        vga_write_string("Error Code: 0x");
+        
+        // Convert error code to hex string
+        char err_str[9];
+        for (int i = 0; i < 8; i++) {
+            uint8_t nibble = (error_code >> ((7-i) * 4)) & 0xF;
+            err_str[i] = (nibble < 10) ? ('0' + nibble) : ('A' + nibble - 10);
+        }
+        err_str[8] = 0;
+        vga_write_string(err_str);
+        vga_write_string("\n");
+        
+        // Extract the segment selector index from the error code
+        uint32_t selector_index = error_code & 0xFFF8;
+        uint8_t table = (error_code & 0x0006) >> 1;
+        uint8_t external = error_code & 0x0001;
+        
+        if (error_code != 0) {
+            // Display information about the selector that caused the fault
+            vga_write_string("Selector Index: ");
+            char index_str[5];
+            for (int i = 0; i < 4; i++) {
+                uint8_t nibble = (selector_index >> ((3-i) * 4)) & 0xF;
+                index_str[i] = (nibble < 10) ? ('0' + nibble) : ('A' + nibble - 10);
+            }
+            index_str[4] = 0;
+            vga_write_string(index_str);
+            vga_write_string("\n");
+            
+            vga_write_string("Table: ");
+            switch(table) {
+                case 0: vga_write_string("GDT"); break;
+                case 2: vga_write_string("LDT"); break;
+                case 1: case 3: vga_write_string("IDT"); break;
+            }
+            vga_write_string("\n");
+            
+            vga_write_string("Source: ");
+            vga_write_string(external ? "External program" : "Processor");
+            vga_write_string("\n");
+        }
+        
+        // Get instruction pointer and code segment from the stack
+        uint32_t eip, cs;
+        asm volatile(
+            "mov %0, [esp + 8]\n\t"  // EIP is at esp+8
+            "mov %1, [esp + 12]"     // CS is at esp+12
+            : "=r"(eip), "=r"(cs)
+            : : "memory"
+        );
+        
+        // Display fault information
+        vga_write_string("Fault Address: 0x");
+        char eip_str[9];
+        for (int i = 0; i < 8; i++) {
+            uint8_t nibble = (eip >> ((7-i) * 4)) & 0xF;
+            eip_str[i] = (nibble < 10) ? ('0' + nibble) : ('A' + nibble - 10);
+        }
+        eip_str[8] = 0;
+        vga_write_string(eip_str);
+        
+        vga_write_string(" in segment 0x");
+        char cs_str[5];
+        for (int i = 0; i < 4; i++) {
+            uint8_t nibble = (cs >> ((3-i) * 4)) & 0xF;
+            cs_str[i] = (nibble < 10) ? ('0' + nibble) : ('A' + nibble - 10);
+        }
+        cs_str[4] = 0;
+        vga_write_string(cs_str);
+        vga_write_string("\n");
+        
+        vga_write_string("\nPossible causes:\n");
+        vga_write_string("- Segment limit exceeded\n");
+        vga_write_string("- Executing privileged instruction in user mode\n");
+        vga_write_string("- Writing to read-only memory\n");
+        vga_write_string("- Null pointer dereference\n");
+        
+        // Restore color
+        vga_set_color(old_color);
     }
     
     UINTOS_INTERRUPT_RETURN();
@@ -562,6 +695,103 @@ void uintos_handle_page_fault(uint32_t error_code) {
     if (exception_handlers[EXC_PAGE_FAULT]) {
         // Pass faulting address in context
         exception_handlers[EXC_PAGE_FAULT](error_code, (void*)faulting_address);
+    } else {
+        // Enhanced default handler with detailed diagnostic information
+        uint8_t old_color = vga_current_color;
+        vga_set_color(vga_entry_color(VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK));
+        
+        vga_write_string("\nCPU EXCEPTION: Page Fault\n");
+        
+        // Convert faulting address to string
+        char addr_str[9];
+        for (int i = 0; i < 8; i++) {
+            uint8_t nibble = (faulting_address >> ((7-i) * 4)) & 0xF;
+            addr_str[i] = (nibble < 10) ? ('0' + nibble) : ('A' + nibble - 10);
+        }
+        addr_str[8] = 0;
+        
+        vga_write_string("Faulting Address: 0x");
+        vga_write_string(addr_str);
+        vga_write_string("\n");
+        
+        // Decode and display error code information
+        vga_write_string("Fault Details: ");
+        
+        if (error_code & 0x01) {
+            vga_write_string("Page Protection Violation");
+        } else {
+            vga_write_string("Non-present Page");
+        }
+        
+        vga_write_string(", ");
+        if (error_code & 0x02) {
+            vga_write_string("Write Operation");
+        } else {
+            vga_write_string("Read Operation");
+        }
+        
+        vga_write_string(", ");
+        if (error_code & 0x04) {
+            vga_write_string("User-Mode Access");
+        } else {
+            vga_write_string("Supervisor-Mode Access");
+        }
+        
+        if (error_code & 0x08) {
+            vga_write_string(", Reserved Bits Set");
+        }
+        
+        if (error_code & 0x10) {
+            vga_write_string(", Instruction Fetch");
+        }
+        
+        vga_write_string("\n");
+        
+        // Get instruction pointer and code segment from the stack
+        uint32_t eip, cs;
+        asm volatile(
+            "mov %0, [esp + 8]\n\t"  // EIP is at esp+8
+            "mov %1, [esp + 12]"     // CS is at esp+12
+            : "=r"(eip), "=r"(cs)
+            : : "memory"
+        );
+        
+        // Display code address info
+        vga_write_string("Code Location: 0x");
+        char eip_str[9];
+        for (int i = 0; i < 8; i++) {
+            uint8_t nibble = (eip >> ((7-i) * 4)) & 0xF;
+            eip_str[i] = (nibble < 10) ? ('0' + nibble) : ('A' + nibble - 10);
+        }
+        eip_str[8] = 0;
+        vga_write_string(eip_str);
+        
+        vga_write_string(" in segment 0x");
+        char cs_str[5];
+        for (int i = 0; i < 4; i++) {
+            uint8_t nibble = (cs >> ((3-i) * 4)) & 0xF;
+            cs_str[i] = (nibble < 10) ? ('0' + nibble) : ('A' + nibble - 10);
+        }
+        cs_str[4] = 0;
+        vga_write_string(cs_str);
+        vga_write_string("\n");
+        
+        // Provide potential causes based on error code
+        vga_write_string("\nPossible causes:\n");
+        if (!(error_code & 0x01)) {
+            vga_write_string("- Memory page not mapped (null pointer?)\n");
+            vga_write_string("- Accessing unmapped virtual address\n");
+        } else {
+            vga_write_string("- Insufficient privileges for memory access\n");
+            vga_write_string("- Writing to read-only page\n");
+        }
+        
+        if (error_code & 0x08) {
+            vga_write_string("- Page table entry contains reserved bits set\n");
+        }
+        
+        // Restore color
+        vga_set_color(old_color);
     }
     
     UINTOS_INTERRUPT_RETURN();
@@ -649,3 +879,423 @@ void uintos_handle_double_fault_alt(uint32_t error_code) {
     UINTOS_INTERRUPT_RETURN();
 }
 UINTOS_TASK_END(uintos_irq20);
+
+/* --------- Enhanced IRQ Management Implementation ---------- */
+
+// IRQ handler table for the enhanced handlers
+static uintos_irq_handler_entry_t enhanced_irq_handlers[256][MAX_IRQ_HANDLERS_PER_VECTOR];
+
+// IRQ statistics tracking
+static uint32_t irq_statistics_count[256] = {0};
+static uint32_t irq_statistics_time[256] = {0};
+static uint8_t irq_enabled_status[256] = {0};
+
+// Spurious IRQ handler
+static void (*spurious_irq_handler)(uint8_t irq) = NULL;
+
+// IRQ names for debugging
+static const char* irq_names[32] = {
+    "Divide Error", "Debug", "NMI", "Breakpoint", 
+    "Overflow", "BOUND Range", "Invalid Opcode", "Device Not Available",
+    "Double Fault", "Coprocessor Segment Overrun", "Invalid TSS", "Segment Not Present",
+    "Stack Segment Fault", "General Protection", "Page Fault", "Reserved",
+    "x87 FPU Error", "Alignment Check", "Machine Check", "SIMD Exception",
+    "Virtualization Exception", "Control Protection", "Reserved", "Reserved",
+    "Reserved", "Reserved", "Reserved", "Reserved",
+    "Reserved", "Reserved", "Reserved", "Reserved"
+};
+
+/**
+ * Register an enhanced IRQ handler with priority and context
+ */
+uintos_irq_result_t register_enhanced_irq_handler(uint8_t irq, uintos_enhanced_irq_handler_t handler, 
+                                                uintos_irq_priority_t priority, void* context, 
+                                                uint32_t flags, const char* name) {
+    // Ensure IRQ number and priority are valid
+    if (irq >= 256 || priority >= MAX_IRQ_PRIORITY_LEVELS) {
+        return IRQ_RESULT_ERROR;
+    }
+    
+    // Find an empty slot or a lower priority slot
+    int slot = -1;
+    for (int i = 0; i < MAX_IRQ_HANDLERS_PER_VECTOR; i++) {
+        if (enhanced_irq_handlers[irq][i].handler == NULL) {
+            // Found an empty slot
+            slot = i;
+            break;
+        }
+        else if (enhanced_irq_handlers[irq][i].priority > priority) {
+            // Found a lower priority handler, shift everything down
+            for (int j = MAX_IRQ_HANDLERS_PER_VECTOR - 1; j > i; j--) {
+                enhanced_irq_handlers[irq][j] = enhanced_irq_handlers[irq][j-1];
+            }
+            slot = i;
+            break;
+        }
+    }
+    
+    // If no slot found, return error
+    if (slot == -1) {
+        return IRQ_RESULT_ERROR;
+    }
+    
+    // Register the handler
+    enhanced_irq_handlers[irq][slot].handler = handler;
+    enhanced_irq_handlers[irq][slot].priority = priority;
+    enhanced_irq_handlers[irq][slot].context = context;
+    enhanced_irq_handlers[irq][slot].flags = flags;
+    enhanced_irq_handlers[irq][slot].name = name;
+    
+    // Enable the IRQ if not already enabled
+    if (!irq_enabled_status[irq]) {
+        irq_enable(irq);
+    }
+    
+    return IRQ_RESULT_HANDLED;
+}
+
+/**
+ * Unregister an IRQ handler
+ */
+uintos_irq_result_t unregister_irq_handler(uint8_t irq, uintos_enhanced_irq_handler_t handler) {
+    // Ensure IRQ number is valid
+    if (irq >= 256) {
+        return IRQ_RESULT_ERROR;
+    }
+    
+    // Find the handler
+    int found = 0;
+    for (int i = 0; i < MAX_IRQ_HANDLERS_PER_VECTOR; i++) {
+        if (enhanced_irq_handlers[irq][i].handler == handler) {
+            // Found the handler, remove it
+            found = 1;
+            
+            // Shift all handlers up
+            for (int j = i; j < MAX_IRQ_HANDLERS_PER_VECTOR - 1; j++) {
+                enhanced_irq_handlers[irq][j] = enhanced_irq_handlers[irq][j+1];
+            }
+            
+            // Clear the last slot
+            enhanced_irq_handlers[irq][MAX_IRQ_HANDLERS_PER_VECTOR - 1].handler = NULL;
+            enhanced_irq_handlers[irq][MAX_IRQ_HANDLERS_PER_VECTOR - 1].priority = 0;
+            enhanced_irq_handlers[irq][MAX_IRQ_HANDLERS_PER_VECTOR - 1].context = NULL;
+            enhanced_irq_handlers[irq][MAX_IRQ_HANDLERS_PER_VECTOR - 1].flags = 0;
+            enhanced_irq_handlers[irq][MAX_IRQ_HANDLERS_PER_VECTOR - 1].name = NULL;
+            
+            break;
+        }
+    }
+    
+    // If all handlers are gone, disable the IRQ
+    int all_gone = 1;
+    for (int i = 0; i < MAX_IRQ_HANDLERS_PER_VECTOR; i++) {
+        if (enhanced_irq_handlers[irq][i].handler != NULL) {
+            all_gone = 0;
+            break;
+        }
+    }
+    
+    if (all_gone) {
+        irq_disable(irq);
+    }
+    
+    return found ? IRQ_RESULT_HANDLED : IRQ_RESULT_UNHANDLED;
+}
+
+/**
+ * Get statistics for an IRQ
+ */
+void irq_get_statistics(uint8_t irq, uint32_t* count, uint32_t* time_spent) {
+    if (irq < 256) {
+        if (count) *count = irq_statistics_count[irq];
+        if (time_spent) *time_spent = irq_statistics_time[irq];
+    }
+}
+
+/**
+ * Reset statistics for an IRQ
+ */
+void irq_reset_statistics(uint8_t irq) {
+    if (irq < 256) {
+        irq_statistics_count[irq] = 0;
+        irq_statistics_time[irq] = 0;
+    }
+}
+
+/**
+ * Dump information about all handlers registered for an IRQ
+ */
+void irq_dump_handlers(uint8_t irq) {
+    if (irq >= 256) {
+        return;
+    }
+    
+    uint8_t old_color = vga_current_color;
+    vga_set_color(vga_entry_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK));
+    
+    vga_write_string("IRQ ");
+    
+    // Convert IRQ to string
+    char irq_str[4];
+    if (irq < 10) {
+        irq_str[0] = '0' + irq;
+        irq_str[1] = 0;
+    } else if (irq < 100) {
+        irq_str[0] = '0' + (irq / 10);
+        irq_str[1] = '0' + (irq % 10);
+        irq_str[2] = 0;
+    } else {
+        irq_str[0] = '0' + (irq / 100);
+        irq_str[1] = '0' + ((irq / 10) % 10);
+        irq_str[2] = '0' + (irq % 10);
+        irq_str[3] = 0;
+    }
+    vga_write_string(irq_str);
+    
+    vga_write_string(" (");
+    
+    // Show name if available
+    const char* name = irq_get_name(irq);
+    if (name) {
+        vga_write_string(name);
+    } else {
+        vga_write_string("Unknown");
+    }
+    
+    vga_write_string(") handlers:\n");
+    
+    // Display all registered handlers
+    int handlers_found = 0;
+    for (int i = 0; i < MAX_IRQ_HANDLERS_PER_VECTOR; i++) {
+        if (enhanced_irq_handlers[irq][i].handler != NULL) {
+            handlers_found = 1;
+            
+            // Convert priority to string
+            char prio_str[3];
+            uint8_t priority = enhanced_irq_handlers[irq][i].priority;
+            prio_str[0] = '0' + (priority / 10);
+            prio_str[1] = '0' + (priority % 10);
+            prio_str[2] = 0;
+            
+            vga_write_string(" - Priority: ");
+            vga_write_string(prio_str);
+            
+            vga_write_string(", Handler: ");
+            if (enhanced_irq_handlers[irq][i].name) {
+                vga_write_string(enhanced_irq_handlers[irq][i].name);
+            } else {
+                vga_write_string("<unnamed>");
+            }
+            vga_write_string("\n");
+        }
+    }
+    
+    if (!handlers_found) {
+        vga_write_string(" No handlers registered\n");
+    }
+    
+    // Display statistics
+    vga_write_string(" Statistics: Count=");
+    
+    // Convert count to string
+    char count_str[11];
+    uint32_t count = irq_statistics_count[irq];
+    int count_idx = 0;
+    do {
+        count_str[10 - count_idx] = '0' + (count % 10);
+        count /= 10;
+        count_idx++;
+    } while (count > 0);
+    
+    // Fill the rest with spaces
+    for (int i = 0; i < 10 - count_idx; i++) {
+        count_str[i] = ' ';
+    }
+    count_str[10] = '\0';
+    
+    vga_write_string(count_str);
+    
+    vga_write_string(", Status: ");
+    vga_write_string(irq_is_enabled(irq) ? "Enabled" : "Disabled");
+    vga_write_string("\n");
+    
+    // Restore color
+    vga_set_color(old_color);
+}
+
+/**
+ * Get the name of an IRQ
+ */
+const char* irq_get_name(uint8_t irq) {
+    if (irq < 32) {
+        return irq_names[irq];
+    }
+    
+    // Special cases for common hardware IRQs
+    switch (irq) {
+        case 32: return "Timer";
+        case 33: return "Keyboard";
+        case 34: return "Cascade";
+        case 35: return "COM2";
+        case 36: return "COM1";
+        case 37: return "LPT2";
+        case 38: return "Floppy";
+        case 39: return "LPT1";
+        case 40: return "CMOS RTC";
+        case 44: return "PS/2 Mouse";
+        case 45: return "FPU";
+        case 46: return "ATA Primary";
+        case 47: return "ATA Secondary";
+        default: return NULL;
+    }
+}
+
+/**
+ * Enable an IRQ
+ */
+void irq_enable(uint8_t irq) {
+    if (irq >= 256) {
+        return;
+    }
+    
+    // Mark as enabled
+    irq_enabled_status[irq] = 1;
+    
+    // Handle hardware-specific enabling
+    if (apic_supported()) {
+        // If using APIC, handle via IOAPIC
+        if (irq >= 32 && irq < 48) {
+            // Convert IRQ 32-47 to 0-15 for legacy PIC IRQs
+            uint8_t pic_irq = irq - 32;
+            pic_clear_mask(pic_irq);
+        }
+    } else {
+        // Legacy PIC
+        if (irq >= 32 && irq < 48) {
+            pic_clear_mask(irq - 32);
+        }
+    }
+}
+
+/**
+ * Disable an IRQ
+ */
+void irq_disable(uint8_t irq) {
+    if (irq >= 256) {
+        return;
+    }
+    
+    // Mark as disabled
+    irq_enabled_status[irq] = 0;
+    
+    // Handle hardware-specific disabling
+    if (apic_supported()) {
+        // If using APIC, handle via IOAPIC
+        if (irq >= 32 && irq < 48) {
+            // Convert IRQ 32-47 to 0-15 for legacy PIC IRQs
+            uint8_t pic_irq = irq - 32;
+            pic_set_mask(pic_irq);
+        }
+    } else {
+        // Legacy PIC
+        if (irq >= 32 && irq < 48) {
+            pic_set_mask(irq - 32);
+        }
+    }
+}
+
+/**
+ * Check if an IRQ is enabled
+ */
+uint8_t irq_is_enabled(uint8_t irq) {
+    if (irq >= 256) {
+        return 0;
+    }
+    return irq_enabled_status[irq];
+}
+
+/**
+ * Mask all IRQs
+ */
+void irq_mask_all(void) {
+    // Disable all interrupts on PIC
+    outb(PIC1_DATA, 0xFF);
+    outb(PIC2_DATA, 0xFF);
+    
+    // Update status flags
+    for (int i = 32; i < 48; i++) {
+        irq_enabled_status[i] = 0;
+    }
+}
+
+/**
+ * Unmask all IRQs
+ */
+void irq_unmask_all(void) {
+    // Enable all interrupts on PIC
+    outb(PIC1_DATA, 0x00);
+    outb(PIC2_DATA, 0x00);
+    
+    // Update status flags
+    for (int i = 32; i < 48; i++) {
+        irq_enabled_status[i] = 1;
+    }
+}
+
+/**
+ * Register a spurious IRQ handler
+ */
+void irq_register_spurious_handler(void (*handler)(uint8_t irq)) {
+    spurious_irq_handler = handler;
+}
+
+/**
+ * Generic IRQ dispatcher for enhanced handlers
+ * This function is called by the assembly interrupt handlers to dispatch to the appropriate C handler
+ */
+void irq_dispatch_enhanced(uint8_t irq) {
+    uint32_t start_time = 0;
+    
+    // Increment the count for this IRQ
+    irq_statistics_count[irq]++;
+    
+    // TODO: Implement timing mechanism for tracking time spent in handlers
+    // start_time = get_system_ticks();
+    
+    // Call all registered handlers in priority order
+    int handled = 0;
+    for (int i = 0; i < MAX_IRQ_HANDLERS_PER_VECTOR; i++) {
+        if (enhanced_irq_handlers[irq][i].handler != NULL) {
+            uintos_irq_result_t result = enhanced_irq_handlers[irq][i].handler(irq, enhanced_irq_handlers[irq][i].context);
+            
+            if (result == IRQ_RESULT_HANDLED) {
+                handled = 1;
+                break;  // Stop processing more handlers
+            }
+            else if (result == IRQ_RESULT_ERROR) {
+                // Log error but continue with next handler
+            }
+            // For IRQ_RESULT_PASS and IRQ_RESULT_UNHANDLED, continue with next handler
+        }
+    }
+    
+    // If not handled and we have a spurious handler, call it
+    if (!handled && spurious_irq_handler != NULL) {
+        spurious_irq_handler(irq);
+    }
+    
+    // Send EOI as needed
+    if (irq >= 32 && irq < 48) {
+        // Hardware IRQ (legacy PIC IRQs are mapped to vectors 32-47)
+        if (apic_supported()) {
+            // Write to APIC EOI register
+            *(uint32_t*)(apic_base_addr + LAPIC_EOI) = 0;
+        } else {
+            // Legacy PIC
+            pic_send_eoi(irq - 32);
+        }
+    }
+    
+    // TODO: Update time spent statistic
+    // irq_statistics_time[irq] += get_system_ticks() - start_time;
+}

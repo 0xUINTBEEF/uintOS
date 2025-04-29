@@ -256,4 +256,57 @@ void uintos_handle_lapic_timer();
 // Interrupt return macro used in handlers
 #define UINTOS_INTERRUPT_RETURN() asm volatile("iret");
 
+/* --------- Enhanced IRQ Management Definitions -------- */
+#define MAX_IRQ_PRIORITY_LEVELS 16
+#define MAX_IRQ_HANDLERS_PER_VECTOR 4
+
+typedef enum {
+    IRQ_PRIORITY_HIGHEST = 0,
+    IRQ_PRIORITY_HIGH = 4,
+    IRQ_PRIORITY_MEDIUM = 8,
+    IRQ_PRIORITY_LOW = 12,
+    IRQ_PRIORITY_LOWEST = 15
+} uintos_irq_priority_t;
+
+typedef enum {
+    IRQ_RESULT_HANDLED = 0,       // IRQ was fully handled
+    IRQ_RESULT_UNHANDLED = 1,     // IRQ was not handled
+    IRQ_RESULT_PASS = 2,          // IRQ was handled but should be passed to next handler
+    IRQ_RESULT_ERROR = 3          // Error occurred during handling
+} uintos_irq_result_t;
+
+typedef uintos_irq_result_t (*uintos_enhanced_irq_handler_t)(uint32_t irq, void* context);
+
+typedef struct {
+    uintos_enhanced_irq_handler_t handler;
+    uintos_irq_priority_t priority;
+    void* context;
+    uint32_t flags;
+    const char* name;  // Name/description of handler for debugging
+} uintos_irq_handler_entry_t;
+
+/* --------- Enhanced IRQ Function Declarations -------- */
+// Enhanced IRQ registration with priorities and chaining
+uintos_irq_result_t register_enhanced_irq_handler(uint8_t irq, uintos_enhanced_irq_handler_t handler, 
+                                                 uintos_irq_priority_t priority, void* context, 
+                                                 uint32_t flags, const char* name);
+                                                 
+uintos_irq_result_t unregister_irq_handler(uint8_t irq, uintos_enhanced_irq_handler_t handler);
+
+// IRQ statistics and debugging
+void irq_get_statistics(uint8_t irq, uint32_t* count, uint32_t* time_spent);
+void irq_reset_statistics(uint8_t irq);
+void irq_dump_handlers(uint8_t irq);
+const char* irq_get_name(uint8_t irq);
+
+// IRQ control functions
+void irq_enable(uint8_t irq);
+void irq_disable(uint8_t irq);
+uint8_t irq_is_enabled(uint8_t irq);
+void irq_mask_all(void);
+void irq_unmask_all(void);
+
+// Spurious IRQ handling
+void irq_register_spurious_handler(void (*handler)(uint8_t irq));
+
 #endif /* IRQH */
