@@ -6,6 +6,10 @@ COMPILER_FLAGS+=-fno-stack-protector -fno-omit-frame-pointer -fno-asynchronous-u
 COMPILER_FLAGS+=-fno-builtin -masm=intel -m32 -nostdlib -gdwarf-2 -ggdb3 -save-temps
 
 SOURCE_FILES := gdt.c io.c irq.c task.c lapic.c task1.c keyboard.c shell.c vga.c task2.c kernel.c
+# Add logging files to sources
+LOGGING_FILES := logging/log.c
+SOURCE_FILES += $(LOGGING_FILES)
+
 OBJECT_FILES := $(patsubst %.c, $(BUILD_OUTPUT)/kern/%.o, $(SOURCE_FILES))
 
 # Add filesystem and memory management to kernel build
@@ -27,6 +31,11 @@ all: $(KERNEL_BINARY)
 $(BUILD_OUTPUT)/kern/%.o: %.c
 	gcc $(COMPILER_FLAGS) -m32 -c $< -o $@
 
+# Special rule for logging files to ensure directories are created
+$(BUILD_OUTPUT)/kern/logging/%.o: logging/%.c
+	mkdir -p $(BUILD_OUTPUT)/kern/logging
+	gcc $(COMPILER_FLAGS) -m32 -c $< -o $@
+
 $(BUILD_OUTPUT)/filesystem/%.o: $(FILESYSTEM_DIR)/%.c
 	mkdir -p $(BUILD_OUTPUT)/filesystem
 	gcc $(COMPILER_FLAGS) -m32 -c $< -o $@
@@ -43,4 +52,4 @@ $(KERNEL_BINARY): $(ALL_OBJECTS)
 
 # Add a clean target to remove build artifacts
 clean:
-	rm -f *.o kernel $(BUILD_OUTPUT)/kern/*.o $(BUILD_OUTPUT)/filesystem/*.o $(BUILD_OUTPUT)/memory/*.o
+	rm -f *.o kernel $(BUILD_OUTPUT)/kern/*.o $(BUILD_OUTPUT)/filesystem/*.o $(BUILD_OUTPUT)/memory/*.o $(BUILD_OUTPUT)/kern/logging/*.o

@@ -211,6 +211,8 @@ void shell_execute_command(const char *command) {
             cmd_cat(argc, argv);
         } else if (strcmp(argv[0], "vgademo") == 0) {
             cmd_vgademo(argc, argv);
+        } else if (strcmp(argv[0], "log") == 0) {
+            cmd_log(argc, argv);
         } else {
             shell_println("Unknown command. Type 'help' for a list of commands.");
         }
@@ -236,6 +238,7 @@ void cmd_help(int argc, char *argv[]) {
     shell_println("  taskinfo - Display task information");
     shell_println("  reboot   - Reboot the system");
     shell_println("  vgademo  - Run VGA demonstration");
+    shell_println("  log      - View and manage system logs");
 }
 
 void cmd_clear(int argc, char *argv[]) {
@@ -657,4 +660,223 @@ void cmd_vgademo(int argc, char *argv[]) {
     // Run the VGA demonstration
     extern void vga_demo();
     vga_demo();
+}
+
+// Log command implementation
+void cmd_log(int argc, char *argv[]) {
+    // Include logging header
+    #include "logging/log.h"
+    
+    if (argc == 1) {
+        // Display usage information if no arguments
+        shell_println("Usage: log <command> [options]");
+        shell_println("Commands:");
+        shell_println("  show      - Display current log buffer");
+        shell_println("  clear     - Clear the log buffer");
+        shell_println("  level     - Set or display log level");
+        shell_println("  dest      - Set or display log destinations");
+        shell_println("  format    - Set or display log format options");
+        shell_println("  test      - Generate test log messages");
+        shell_println("");
+        shell_println("Examples:");
+        shell_println("  log show                   - Show current logs");
+        shell_println("  log level                  - Display current log level");
+        shell_println("  log level debug            - Set log level to debug");
+        shell_println("  log dest                   - Display current log destinations");
+        shell_println("  log dest screen            - Set logs to appear only on screen");
+        shell_println("  log dest memory+screen     - Enable multiple destinations");
+        return;
+    }
+    
+    // Handle various log subcommands
+    if (strcmp(argv[1], "show") == 0) {
+        // Show current log buffer
+        log_dump_buffer();
+    }
+    else if (strcmp(argv[1], "clear") == 0) {
+        // Clear the log buffer
+        log_clear_buffer();
+        shell_println("Log buffer cleared");
+    }
+    else if (strcmp(argv[1], "level") == 0) {
+        if (argc == 2) {
+            // Display current log level
+            shell_println("Current log levels (from least to most severe):");
+            shell_println("  0: TRACE     - Detailed tracing information");
+            shell_println("  1: DEBUG     - Debugging information");
+            shell_println("  2: INFO      - General information");
+            shell_println("  3: NOTICE    - Normal but significant events");
+            shell_println("  4: WARNING   - Potential issues");
+            shell_println("  5: ERROR     - Error conditions");
+            shell_println("  6: CRITICAL  - Critical conditions");
+            shell_println("  7: ALERT     - Action must be taken immediately");
+            shell_println("  8: EMERGENCY - System is unusable");
+        } else {
+            // Set log level based on argument
+            log_level_t level = LOG_LEVEL_INFO; // Default to info
+            
+            if (strcmp(argv[2], "trace") == 0) {
+                level = LOG_LEVEL_TRACE;
+            } else if (strcmp(argv[2], "debug") == 0) {
+                level = LOG_LEVEL_DEBUG;
+            } else if (strcmp(argv[2], "info") == 0) {
+                level = LOG_LEVEL_INFO;
+            } else if (strcmp(argv[2], "notice") == 0) {
+                level = LOG_LEVEL_NOTICE;
+            } else if (strcmp(argv[2], "warning") == 0) {
+                level = LOG_LEVEL_WARNING;
+            } else if (strcmp(argv[2], "error") == 0) {
+                level = LOG_LEVEL_ERROR;
+            } else if (strcmp(argv[2], "critical") == 0) {
+                level = LOG_LEVEL_CRITICAL;
+            } else if (strcmp(argv[2], "alert") == 0) {
+                level = LOG_LEVEL_ALERT;
+            } else if (strcmp(argv[2], "emergency") == 0) {
+                level = LOG_LEVEL_EMERGENCY;
+            } else {
+                // Try to parse as numeric level
+                int num_level = 0;
+                for (int i = 0; argv[2][i] != '\0'; i++) {
+                    if (argv[2][i] >= '0' && argv[2][i] <= '9') {
+                        num_level = num_level * 10 + (argv[2][i] - '0');
+                    } else {
+                        shell_println("Invalid log level");
+                        return;
+                    }
+                }
+                if (num_level >= 0 && num_level <= 8) {
+                    level = (log_level_t)num_level;
+                } else {
+                    shell_println("Invalid log level. Must be 0-8 or named level");
+                    return;
+                }
+            }
+            
+            // Set the new log level
+            log_set_level(level);
+            shell_print("Log level set to: ");
+            shell_println(log_level_to_string(level));
+        }
+    }
+    else if (strcmp(argv[1], "dest") == 0) {
+        if (argc == 2) {
+            // Display current destinations
+            shell_println("Log destination options:");
+            shell_println("  memory   - Store logs in memory buffer");
+            shell_println("  screen   - Output logs to screen");
+            shell_println("  serial   - Output logs to serial port");
+            shell_println("  all      - Output logs to all destinations");
+            shell_println("");
+            shell_println("Use + to combine destinations (e.g., memory+screen)");
+        } else {
+            // Parse destination options
+            uint8_t dest = 0;
+            char *token = argv[2];
+            char *next;
+            
+            while (token && *token) {
+                // Find the end of the current token (before the +)
+                next = token;
+                while (*next && *next != '+') next++;
+                
+                // Temporarily null-terminate this token
+                char old_char = *next;
+                *next = '\0';
+                
+                // Process the token
+                if (strcmp(token, "memory") == 0) {
+                    dest |= LOG_DEST_MEMORY;
+                } else if (strcmp(token, "screen") == 0) {
+                    dest |= LOG_DEST_SCREEN;
+                } else if (strcmp(token, "serial") == 0) {
+                    dest |= LOG_DEST_SERIAL;
+                } else if (strcmp(token, "all") == 0) {
+                    dest = LOG_DEST_ALL;
+                    break;
+                } else {
+                    shell_println("Invalid destination option");
+                    return;
+                }
+                
+                // Restore the character and move to next token
+                *next = old_char;
+                if (*next == '+') next++;
+                token = *next ? next : NULL;
+            }
+            
+            // Set the new destinations
+            log_set_destinations(dest);
+            shell_println("Log destinations updated");
+        }
+    }
+    else if (strcmp(argv[1], "format") == 0) {
+        if (argc == 2) {
+            // Display format options
+            shell_println("Log format options:");
+            shell_println("  timestamp - Include timestamp");
+            shell_println("  level     - Include log level");
+            shell_println("  source    - Include source info");
+            shell_println("  full      - Include all format options");
+            shell_println("");
+            shell_println("Use + to combine options (e.g., level+source)");
+        } else {
+            // Parse format options
+            uint8_t format = 0;
+            char *token = argv[2];
+            char *next;
+            
+            while (token && *token) {
+                // Find the end of the current token (before the +)
+                next = token;
+                while (*next && *next != '+') next++;
+                
+                // Temporarily null-terminate this token
+                char old_char = *next;
+                *next = '\0';
+                
+                // Process the token
+                if (strcmp(token, "timestamp") == 0) {
+                    format |= LOG_FORMAT_TIMESTAMP;
+                } else if (strcmp(token, "level") == 0) {
+                    format |= LOG_FORMAT_LEVEL;
+                } else if (strcmp(token, "source") == 0) {
+                    format |= LOG_FORMAT_SOURCE;
+                } else if (strcmp(token, "full") == 0) {
+                    format = LOG_FORMAT_FULL;
+                    break;
+                } else {
+                    shell_println("Invalid format option");
+                    return;
+                }
+                
+                // Restore the character and move to next token
+                *next = old_char;
+                if (*next == '+') next++;
+                token = *next ? next : NULL;
+            }
+            
+            // Set the new format options
+            log_set_format_options(format);
+            shell_println("Log format options updated");
+        }
+    }
+    else if (strcmp(argv[1], "test") == 0) {
+        // Generate test log messages at various levels
+        shell_println("Generating test log messages...");
+        
+        log_trace("TEST", "This is a TRACE message");
+        log_debug("TEST", "This is a DEBUG message");
+        log_info("TEST", "This is an INFO message");
+        log_notice("TEST", "This is a NOTICE message");
+        log_warning("TEST", "This is a WARNING message");
+        log_error("TEST", "This is an ERROR message");
+        log_critical("TEST", "This is a CRITICAL message");
+        log_alert("TEST", "This is an ALERT message");
+        log_emergency("TEST", "This is an EMERGENCY message");
+        
+        shell_println("Test messages generated. Use 'log show' to see messages in the buffer.");
+    }
+    else {
+        shell_println("Unknown log subcommand. Try 'log' for help.");
+    }
 }

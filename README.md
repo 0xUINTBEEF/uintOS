@@ -11,10 +11,12 @@ uintOS is an educational operating system that demonstrates OS concepts, kernel 
 - **UI**: Interactive shell and text-based interface
 - **File System**: FAT12, ext2, and ISO 9660 support
 - **Debugging**: Built-in tools and error reporting
+- **Logging**: Centralized logging system with severity levels and multiple outputs
 
 ## Latest Enhancements
 - **HAL Improvements**: Better hardware abstraction and portability
 - **Enhanced IRQ System**: Priority-based handlers, diagnostics, debugging tools
+- **Logging System**: Comprehensive logging with multiple severity levels
 - **VGA Graphics**: Text mode UI elements with color support
 - **Memory Safety**: Corruption detection and improved allocation
 - **File System**: Added ext2 and ISO 9660 support
@@ -26,10 +28,19 @@ uintOS is an educational operating system that demonstrates OS concepts, kernel 
 - IRQ statistics and debugging tools
 - Support for both PIC and APIC interrupt controllers
 
+## Logging System
+- Nine severity levels from TRACE to EMERGENCY
+- Configurable output destinations (screen, memory buffer, serial)
+- Customizable formatting options
+- Integration with IRQ and error handling
+- Log buffer for storing and reviewing system messages
+- Interactive shell commands for managing logs
+
 ## Project Structure
 - `bootloader/`: Bootloader code
 - `hal/`: Hardware Abstraction Layer
 - `kernel/`: Core OS code and drivers
+  - `logging/`: Logging subsystem
 - `memory/`: Memory management
 - `filesystem/`: File system implementation
 - `test/`: Testing framework
@@ -42,6 +53,7 @@ uintOS is an educational operating system that demonstrates OS concepts, kernel 
 - `meminfo`: Memory info
 - `taskinfo`: Process info
 - `reboot`: Restart system
+- `log`: Manage system logs
 
 ## Build
 1. Install cross-compiler
@@ -52,4 +64,4 @@ uintOS is an educational operating system that demonstrates OS concepts, kernel 
 MIT License
 
 ---
-*Last Updated: April 29, 2025*
+*Last Updated: April 30, 2025*

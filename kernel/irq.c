@@ -2,6 +2,7 @@
 #include "task.h"
 #include "lapic.h"
 #include "io.h"
+#include "logging/log.h" // Include the new logging system
 
 /* --------- IDT Implementation ---------- */
 static segment_descriptor uintos_interrupt_gates[UINTOS_IDT_SIZE];
@@ -368,6 +369,10 @@ void register_irq_handler(uint8_t irq, uintos_interrupt_handler_t handler) {
  * Initialize the interrupt system
  */
 void uintos_initialize_interrupts() {
+    // Initialize the logging system first for better debugging
+    log_init(LOG_LEVEL_INFO, LOG_DEST_SCREEN | LOG_DEST_MEMORY, LOG_FORMAT_LEVEL | LOG_FORMAT_SOURCE);
+    log_info("IRQ", "Initializing interrupt system");
+    
     // Initialize predefined IRQ handlers
     uintos_init_irq(uintos_irq0, EXC_DIVIDE_ERROR);
     uintos_init_irq(uintos_irq1, EXC_DEBUG);
@@ -382,19 +387,27 @@ void uintos_initialize_interrupts() {
     uintos_init_irq(uintos_irq32, 32); // Timer IRQ
 
     // Initialize PIC
+    log_info("IRQ", "Initializing PIC with vectors 0x20-0x2F");
     pic_init(0x20, 0x28);  // Map IRQs 0-7 to vectors 0x20-0x27, IRQs 8-15 to 0x28-0x2F
     
     // If APIC is supported, initialize it
     if (apic_supported()) {
+        log_info("IRQ", "APIC supported, initializing APIC");
         apic_init();
         ioapic_init();
+    } else {
+        log_info("IRQ", "APIC not supported, using legacy PIC");
     }
     
     // Enable NMI
     nmi_enable();
+    log_debug("IRQ", "NMI enabled");
     
     // Load the IDT
+    log_info("IRQ", "Loading Interrupt Descriptor Table");
     UINTOS_LOAD_IDT(uintos_interrupt_descriptor_table);
+    
+    log_info("IRQ", "Interrupt system initialization complete");
 }
 
 /* --------- IRQ Handlers ---------- */
@@ -913,6 +926,7 @@ uintos_irq_result_t register_enhanced_irq_handler(uint8_t irq, uintos_enhanced_i
                                                 uint32_t flags, const char* name) {
     // Ensure IRQ number and priority are valid
     if (irq >= 256 || priority >= MAX_IRQ_PRIORITY_LEVELS) {
+        log_error("IRQ", "Failed to register handler: invalid IRQ %d or priority %d", irq, priority);
         return IRQ_RESULT_ERROR;
     }
     
@@ -936,6 +950,7 @@ uintos_irq_result_t register_enhanced_irq_handler(uint8_t irq, uintos_enhanced_i
     
     // If no slot found, return error
     if (slot == -1) {
+        log_error("IRQ", "Failed to register handler: no available slots for IRQ %d", irq);
         return IRQ_RESULT_ERROR;
     }
     
@@ -945,6 +960,9 @@ uintos_irq_result_t register_enhanced_irq_handler(uint8_t irq, uintos_enhanced_i
     enhanced_irq_handlers[irq][slot].context = context;
     enhanced_irq_handlers[irq][slot].flags = flags;
     enhanced_irq_handlers[irq][slot].name = name;
+    
+    log_debug("IRQ", "Registered handler '%s' for IRQ %d with priority %d", 
+             name ? name : "unnamed", irq, priority);
     
     // Enable the IRQ if not already enabled
     if (!irq_enabled_status[irq]) {
@@ -1259,6 +1277,9 @@ void irq_dispatch_enhanced(uint8_t irq) {
     // Increment the count for this IRQ
     irq_statistics_count[irq]++;
     
+    // Log at trace level - only visible when debugging
+    log_trace("IRQ", "Dispatching IRQ %d (%s)", irq, irq_get_name(irq) ? irq_get_name(irq) : "Unknown");
+    
     // TODO: Implement timing mechanism for tracking time spent in handlers
     // start_time = get_system_ticks();
     
@@ -1266,22 +1287,37 @@ void irq_dispatch_enhanced(uint8_t irq) {
     int handled = 0;
     for (int i = 0; i < MAX_IRQ_HANDLERS_PER_VECTOR; i++) {
         if (enhanced_irq_handlers[irq][i].handler != NULL) {
+            const char* handler_name = enhanced_irq_handlers[irq][i].name ? 
+                                      enhanced_irq_handlers[irq][i].name : "unnamed";
+            
+            log_trace("IRQ", "Executing handler '%s' for IRQ %d", handler_name, irq);
+            
             uintos_irq_result_t result = enhanced_irq_handlers[irq][i].handler(irq, enhanced_irq_handlers[irq][i].context);
             
             if (result == IRQ_RESULT_HANDLED) {
+                log_trace("IRQ", "Handler '%s' fully handled IRQ %d", handler_name, irq);
                 handled = 1;
                 break;  // Stop processing more handlers
             }
             else if (result == IRQ_RESULT_ERROR) {
+                log_warning("IRQ", "Handler '%s' returned error for IRQ %d", handler_name, irq);
                 // Log error but continue with next handler
             }
-            // For IRQ_RESULT_PASS and IRQ_RESULT_UNHANDLED, continue with next handler
+            else if (result == IRQ_RESULT_PASS) {
+                log_trace("IRQ", "Handler '%s' passed IRQ %d to next handler", handler_name, irq);
+            }
+            // For IRQ_RESULT_UNHANDLED, continue with next handler
         }
     }
     
     // If not handled and we have a spurious handler, call it
-    if (!handled && spurious_irq_handler != NULL) {
-        spurious_irq_handler(irq);
+    if (!handled) {
+        if (spurious_irq_handler != NULL) {
+            log_debug("IRQ", "IRQ %d not handled by any registered handler, calling spurious handler", irq);
+            spurious_irq_handler(irq);
+        } else {
+            log_warning("IRQ", "Unhandled IRQ %d (%s)", irq, irq_get_name(irq) ? irq_get_name(irq) : "Unknown");
+        }
     }
     
     // Send EOI as needed
@@ -1290,9 +1326,11 @@ void irq_dispatch_enhanced(uint8_t irq) {
         if (apic_supported()) {
             // Write to APIC EOI register
             *(uint32_t*)(apic_base_addr + LAPIC_EOI) = 0;
+            log_trace("IRQ", "Sent EOI to APIC for IRQ %d", irq);
         } else {
             // Legacy PIC
             pic_send_eoi(irq - 32);
+            log_trace("IRQ", "Sent EOI to PIC for IRQ %d", irq);
         }
     }
     
