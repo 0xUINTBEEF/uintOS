@@ -213,6 +213,8 @@ void shell_execute_command(const char *command) {
             cmd_vgademo(argc, argv);
         } else if (strcmp(argv[0], "log") == 0) {
             cmd_log(argc, argv);
+        } else if (strcmp(argv[0], "vfs") == 0) {
+            cmd_vfs(argc, argv);
         } else {
             shell_println("Unknown command. Type 'help' for a list of commands.");
         }
@@ -239,6 +241,7 @@ void cmd_help(int argc, char *argv[]) {
     shell_println("  reboot   - Reboot the system");
     shell_println("  vgademo  - Run VGA demonstration");
     shell_println("  log      - View and manage system logs");
+    shell_println("  vfs      - Virtual filesystem operations");
 }
 
 void cmd_clear(int argc, char *argv[]) {
@@ -660,6 +663,154 @@ void cmd_vgademo(int argc, char *argv[]) {
     // Run the VGA demonstration
     extern void vga_demo();
     vga_demo();
+}
+
+// VFS command implementation
+void cmd_vfs(int argc, char *argv[]) {
+    /* Include necessary headers */
+    #include "../filesystem/vfs/vfs.h"
+    
+    if (argc == 1) {
+        /* Display usage information if no arguments */
+        shell_println("Usage: vfs <command> [options]");
+        shell_println("Commands:");
+        shell_println("  init      - Initialize the VFS system");
+        shell_println("  mount     - Mount a filesystem");
+        shell_println("  unmount   - Unmount a filesystem");
+        shell_println("  list      - List mounted filesystems");
+        shell_println("  info      - Display filesystem information");
+        shell_println("");
+        shell_println("Examples:");
+        shell_println("  vfs init                      - Initialize VFS");
+        shell_println("  vfs mount fat12 fd0 /mnt      - Mount FAT12 filesystem on /mnt");
+        shell_println("  vfs unmount /mnt              - Unmount filesystem at /mnt");
+        shell_println("  vfs list                      - List all mounted filesystems");
+        shell_println("  vfs info /mnt                 - Display info about filesystem at /mnt");
+        return;
+    }
+    
+    /* Handle various VFS subcommands */
+    if (strcmp(argv[1], "init") == 0) {
+        /* Initialize the VFS */
+        int result = vfs_init();
+        if (result == VFS_SUCCESS) {
+            shell_println("VFS initialized successfully");
+            
+            /* Register available filesystem types with VFS */
+            extern void register_fat12_with_vfs();
+            register_fat12_with_vfs();
+            shell_println("Registered filesystem types with VFS");
+        } else {
+            shell_print("Error initializing VFS: ");
+            char buffer[16];
+            int_to_string(result, buffer);
+            shell_println(buffer);
+        }
+    }
+    else if (strcmp(argv[1], "mount") == 0) {
+        /* Mount a filesystem */
+        if (argc < 5) {
+            shell_println("Usage: vfs mount <type> <device> <mountpoint>");
+            return;
+        }
+        
+        const char* fs_type = argv[2];
+        const char* device = argv[3];
+        const char* mount_point = argv[4];
+        
+        int result = vfs_mount(fs_type, device, mount_point, 0);
+        if (result == VFS_SUCCESS) {
+            shell_print("Mounted ");
+            shell_print(fs_type);
+            shell_print(" from ");
+            shell_print(device);
+            shell_print(" on ");
+            shell_println(mount_point);
+        } else {
+            shell_print("Error mounting filesystem: ");
+            char buffer[16];
+            int_to_string(result, buffer);
+            shell_println(buffer);
+        }
+    }
+    else if (strcmp(argv[1], "unmount") == 0) {
+        /* Unmount a filesystem */
+        if (argc < 3) {
+            shell_println("Usage: vfs unmount <mountpoint>");
+            return;
+        }
+        
+        const char* mount_point = argv[2];
+        
+        int result = vfs_unmount(mount_point);
+        if (result == VFS_SUCCESS) {
+            shell_print("Unmounted ");
+            shell_println(mount_point);
+        } else {
+            shell_print("Error unmounting filesystem: ");
+            char buffer[16];
+            int_to_string(result, buffer);
+            shell_println(buffer);
+        }
+    }
+    else if (strcmp(argv[1], "list") == 0) {
+        /* List mounted filesystems - This needs more implementation */
+        shell_println("Mounted filesystems:");
+        shell_println("  Type     Device       Mount Point");
+        shell_println("  ----     ------       -----------");
+        /* 
+         * We need to add a function to VFS to enumerate mount points
+         * For now, just show a placeholder
+         */
+        shell_println("  <Feature not yet implemented>");
+    }
+    else if (strcmp(argv[1], "info") == 0) {
+        /* Display filesystem information */
+        if (argc < 3) {
+            shell_println("Usage: vfs info <path>");
+            return;
+        }
+        
+        const char* path = argv[2];
+        uint64_t total_size, free_size;
+        
+        int result = vfs_statfs(path, &total_size, &free_size);
+        if (result == VFS_SUCCESS) {
+            shell_print("Filesystem information for ");
+            shell_println(path);
+            
+            char buffer[32];
+            
+            shell_print("  Total Size: ");
+            int_to_string(total_size, buffer);
+            shell_println(buffer);
+            
+            shell_print("  Free Space: ");
+            int_to_string(free_size, buffer);
+            shell_println(buffer);
+            
+            uint64_t used_size = total_size - free_size;
+            shell_print("  Used Space: ");
+            int_to_string(used_size, buffer);
+            shell_println(buffer);
+            
+            uint64_t percent_used = (used_size * 100) / total_size;
+            shell_print("  Usage: ");
+            int_to_string(percent_used, buffer);
+            shell_print(buffer);
+            shell_println("%");
+        } else if (result == VFS_ERR_UNSUPPORTED) {
+            shell_println("This filesystem does not support the statfs operation");
+        } else {
+            shell_print("Error getting filesystem information: ");
+            char buffer[16];
+            int_to_string(result, buffer);
+            shell_println(buffer);
+        }
+    }
+    else {
+        shell_println("Unknown vfs subcommand. Try 'vfs' for help.");
+    }
 }
 
 // Log command implementation
