@@ -144,7 +144,7 @@ static void auto_complete() {
     // List of available commands for autocompletion
     const char *commands[] = {
         "help", "clear", "echo", "ls", "cat", "meminfo", "memstat",
-        "memtest", "taskinfo", "reboot", "vgademo", "log", "vfs"
+        "memtest", "taskinfo", "reboot", "vgademo", "log", "vfs", "wdm"
     };
     int command_count = sizeof(commands) / sizeof(commands[0]);
     
@@ -455,6 +455,8 @@ void shell_execute_command(const char *command) {
             cmd_log(argc, argv);
         } else if (strcmp(argv[0], "vfs") == 0) {
             cmd_vfs(argc, argv);
+        } else if (strcmp(argv[0], "wdm") == 0) {
+            cmd_wdm(argc, argv);  // New Windows driver command
         } else {
             log_warning("SHELL", "Unknown command: %s", argv[0]);
             shell_println("Unknown command. Type 'help' for a list of commands.");
@@ -487,6 +489,7 @@ void cmd_help(int argc, char *argv[]) {
     shell_println("  vgademo  - Run VGA demonstration");
     shell_println("  log      - View and manage system logs");
     shell_println("  vfs      - Virtual filesystem operations");
+    shell_println("  wdm      - Windows driver management");
 }
 
 void cmd_clear(int argc, char *argv[]) {
@@ -1277,5 +1280,265 @@ void cmd_log(int argc, char *argv[]) {
     }
     else {
         shell_println("Unknown log subcommand. Try 'log' for help.");
+    }
+}
+
+// Add the implementation of the wdm command
+void cmd_wdm(int argc, char *argv[]) {
+    log_debug("SHELL", "Executing wdm command");
+    
+    #include "../drivers/windows/driver_manager.h"
+    
+    if (argc < 2) {
+        shell_println("Windows Driver Manager Commands:");
+        shell_println("  wdm init         - Initialize the Windows driver subsystem");
+        shell_println("  wdm shutdown     - Shutdown the Windows driver subsystem");
+        shell_println("  wdm load <path> <name> <type> - Load a Windows driver");
+        shell_println("  wdm unload <id>  - Unload a Windows driver");
+        shell_println("  wdm start <id>   - Start a loaded driver");
+        shell_println("  wdm stop <id>    - Stop a running driver");
+        shell_println("  wdm list         - List all loaded drivers");
+        shell_println("  wdm info <id>    - Display information about a driver");
+        shell_println("  wdm devices      - List all registered devices");
+        return;
+    }
+    
+    if (strcmp(argv[1], "init") == 0) {
+        // Initialize the Windows driver manager
+        int status = driver_manager_init();
+        if (status == 0) {
+            shell_println("Windows driver subsystem initialized successfully");
+        } else {
+            shell_print("Failed to initialize Windows driver subsystem: error ");
+            char buf[16];
+            itoa(status, buf, 10);
+            shell_println(buf);
+        }
+    }
+    else if (strcmp(argv[1], "shutdown") == 0) {
+        // Shutdown the Windows driver manager
+        driver_manager_shutdown();
+        shell_println("Windows driver subsystem shutdown complete");
+    }
+    else if (strcmp(argv[1], "load") == 0) {
+        // Load a Windows driver
+        if (argc < 5) {
+            shell_println("Usage: wdm load <path> <name> <type>");
+            shell_println("Types: 0=unknown, 1=storage, 2=network, 3=display, 4=input, 5=audio");
+            return;
+        }
+        
+        const char* path = argv[2];
+        const char* name = argv[3];
+        int type = atoi(argv[4]);
+        uint32_t flags = 0;
+        
+        int driver_id = driver_manager_load(path, name, (driver_type_t)type, flags);
+        
+        if (driver_id >= 0) {
+            shell_print("Driver loaded successfully, ID: ");
+            char buf[16];
+            itoa(driver_id, buf, 10);
+            shell_println(buf);
+        } else {
+            shell_print("Failed to load driver: error ");
+            char buf[16];
+            itoa(driver_id, buf, 10);
+            shell_println(buf);
+        }
+    }
+    else if (strcmp(argv[1], "unload") == 0) {
+        // Unload a Windows driver
+        if (argc < 3) {
+            shell_println("Usage: wdm unload <id>");
+            return;
+        }
+        
+        int driver_id = atoi(argv[2]);
+        int status = driver_manager_unload(driver_id);
+        
+        if (status == 0) {
+            shell_println("Driver unloaded successfully");
+        } else {
+            shell_print("Failed to unload driver: error ");
+            char buf[16];
+            itoa(status, buf, 10);
+            shell_println(buf);
+        }
+    }
+    else if (strcmp(argv[1], "start") == 0) {
+        // Start a loaded driver
+        if (argc < 3) {
+            shell_println("Usage: wdm start <id>");
+            return;
+        }
+        
+        int driver_id = atoi(argv[2]);
+        int status = driver_manager_start(driver_id);
+        
+        if (status == 0) {
+            shell_println("Driver started successfully");
+        } else {
+            shell_print("Failed to start driver: error ");
+            char buf[16];
+            itoa(status, buf, 10);
+            shell_println(buf);
+        }
+    }
+    else if (strcmp(argv[1], "stop") == 0) {
+        // Stop a running driver
+        if (argc < 3) {
+            shell_println("Usage: wdm stop <id>");
+            return;
+        }
+        
+        int driver_id = atoi(argv[2]);
+        int status = driver_manager_stop(driver_id);
+        
+        if (status == 0) {
+            shell_println("Driver stopped successfully");
+        } else {
+            shell_print("Failed to stop driver: error ");
+            char buf[16];
+            itoa(status, buf, 10);
+            shell_println(buf);
+        }
+    }
+    else if (strcmp(argv[1], "list") == 0) {
+        // List all loaded drivers
+        int count = driver_manager_get_count();
+        
+        if (count <= 0) {
+            shell_println("No drivers loaded");
+            return;
+        }
+        
+        shell_println("ID | Name                 | Type   | State   | Devices");
+        shell_println("---+----------------------+--------+---------+--------");
+        
+        for (int i = 0; i < count; i++) {
+            driver_info_t info;
+            if (driver_manager_get_info(i, &info) == 0) {
+                char id[8];
+                itoa(i, id, 10);
+                
+                char devices[8];
+                itoa(info.device_count, devices, 10);
+                
+                // Print driver ID (right-aligned)
+                int spaces = 2 - strlen(id);
+                while (spaces-- > 0) shell_print(" ");
+                shell_print(id);
+                shell_print(" | ");
+                
+                // Print driver name (truncated if needed)
+                shell_print(info.name);
+                spaces = 20 - strlen(info.name);
+                while (spaces-- > 0) shell_print(" ");
+                shell_print(" | ");
+                
+                // Print driver type
+                const char* type_str = "Unknown";
+                switch (info.type) {
+                    case DRV_TYPE_STORAGE: type_str = "Storage"; break;
+                    case DRV_TYPE_NETWORK: type_str = "Network"; break;
+                    case DRV_TYPE_DISPLAY: type_str = "Display"; break;
+                    case DRV_TYPE_INPUT: type_str = "Input"; break;
+                    case DRV_TYPE_AUDIO: type_str = "Audio"; break;
+                    case DRV_TYPE_USB: type_str = "USB"; break;
+                    case DRV_TYPE_SERIAL: type_str = "Serial"; break;
+                    case DRV_TYPE_PARALLEL: type_str = "Parallel"; break;
+                    case DRV_TYPE_SYSTEM: type_str = "System"; break;
+                }
+                shell_print(type_str);
+                spaces = 6 - strlen(type_str);
+                while (spaces-- > 0) shell_print(" ");
+                shell_print(" | ");
+                
+                // Print driver state
+                const char* state_str = "Unknown";
+                switch (info.state) {
+                    case DRV_STATE_UNLOADED: state_str = "Unloaded"; break;
+                    case DRV_STATE_LOADED: state_str = "Loaded"; break;
+                    case DRV_STATE_STARTED: state_str = "Started"; break;
+                    case DRV_STATE_PAUSED: state_str = "Paused"; break;
+                    case DRV_STATE_STOPPED: state_str = "Stopped"; break;
+                    case DRV_STATE_ERROR: state_str = "Error"; break;
+                }
+                shell_print(state_str);
+                spaces = 7 - strlen(state_str);
+                while (spaces-- > 0) shell_print(" ");
+                shell_print(" | ");
+                
+                // Print device count
+                shell_println(devices);
+            }
+        }
+    }
+    else if (strcmp(argv[1], "info") == 0) {
+        // Display information about a driver
+        if (argc < 3) {
+            shell_println("Usage: wdm info <id>");
+            return;
+        }
+        
+        int driver_id = atoi(argv[2]);
+        driver_info_t info;
+        
+        if (driver_manager_get_info(driver_id, &info) == 0) {
+            shell_println("Driver Information:");
+            
+            shell_print("  Name: ");
+            shell_println(info.name);
+            
+            shell_print("  Description: ");
+            shell_println(info.description);
+            
+            shell_print("  Version: ");
+            shell_println(info.version);
+            
+            shell_print("  Type: ");
+            switch (info.type) {
+                case DRV_TYPE_UNKNOWN: shell_println("Unknown"); break;
+                case DRV_TYPE_STORAGE: shell_println("Storage"); break;
+                case DRV_TYPE_NETWORK: shell_println("Network"); break;
+                case DRV_TYPE_DISPLAY: shell_println("Display"); break;
+                case DRV_TYPE_INPUT: shell_println("Input"); break;
+                case DRV_TYPE_AUDIO: shell_println("Audio"); break;
+                case DRV_TYPE_USB: shell_println("USB"); break;
+                case DRV_TYPE_SERIAL: shell_println("Serial"); break;
+                case DRV_TYPE_PARALLEL: shell_println("Parallel"); break;
+                case DRV_TYPE_SYSTEM: shell_println("System"); break;
+                default: shell_println("Invalid"); break;
+            }
+            
+            shell_print("  State: ");
+            switch (info.state) {
+                case DRV_STATE_UNLOADED: shell_println("Unloaded"); break;
+                case DRV_STATE_LOADED: shell_println("Loaded"); break;
+                case DRV_STATE_STARTED: shell_println("Started"); break;
+                case DRV_STATE_PAUSED: shell_println("Paused"); break;
+                case DRV_STATE_STOPPED: shell_println("Stopped"); break;
+                case DRV_STATE_ERROR: shell_println("Error"); break;
+                default: shell_println("Invalid"); break;
+            }
+            
+            shell_print("  Device Count: ");
+            char buf[16];
+            itoa(info.device_count, buf, 10);
+            shell_println(buf);
+            
+            shell_print("  Error Count: ");
+            itoa(info.error_count, buf, 10);
+            shell_println(buf);
+        } else {
+            shell_print("Failed to get driver information for ID: ");
+            char buf[16];
+            itoa(driver_id, buf, 10);
+            shell_println(buf);
+        }
+    }
+    else {
+        shell_println("Unknown wdm command. Type 'wdm' for a list of commands.");
     }
 }
