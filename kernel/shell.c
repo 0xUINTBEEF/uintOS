@@ -6,6 +6,7 @@
 #include "../filesystem/fat12.h"
 #include "../memory/heap.h"
 #include "task.h"
+#include "logging/log.h"
 
 // ANSI color codes
 #define COLOR_RESET "\033[0m"
@@ -15,6 +16,11 @@
 // Buffer for the current command
 static char command_buffer[MAX_COMMAND_LENGTH];
 static int buffer_position = 0;
+
+// Command history buffer
+static char command_history[COMMAND_HISTORY_SIZE][MAX_COMMAND_LENGTH];
+static int history_count = 0;
+static int history_position = -1;
 
 // Utilities for string manipulation
 static int strcmp(const char *s1, const char *s2) {
@@ -80,6 +86,138 @@ static void int_to_string(int value, char *str) {
     // If it was negative, we've already put the sign in place
 }
 
+/**
+ * Add a command to the history buffer
+ */
+static void add_to_history(const char *command) {
+    // Don't add empty commands or duplicates of the last command
+    if (strlen(command) == 0 || (history_count > 0 && 
+        strcmp(command, command_history[history_count - 1]) == 0)) {
+        return;
+    }
+    
+    // Add to history, replacing oldest command if history is full
+    if (history_count < COMMAND_HISTORY_SIZE) {
+        strcpy(command_history[history_count++], command);
+    } else {
+        // Shift all commands one position down
+        for (int i = 0; i < COMMAND_HISTORY_SIZE - 1; i++) {
+            strcpy(command_history[i], command_history[i + 1]);
+        }
+        // Add new command at the end
+        strcpy(command_history[COMMAND_HISTORY_SIZE - 1], command);
+    }
+    
+    // Reset history position to point to the latest command
+    history_position = history_count;
+}
+
+/**
+ * Display the command from history at the given position
+ */
+static void display_history_command(int position) {
+    if (position < 0 || position >= history_count) {
+        return;
+    }
+    
+    // Clear the current line
+    int i;
+    for (i = 0; i < buffer_position; i++) {
+        shell_print("\b \b");
+    }
+    
+    // Copy and display the command from history
+    strcpy(command_buffer, command_history[position]);
+    buffer_position = strlen(command_buffer);
+    shell_print(command_buffer);
+}
+
+/**
+ * Auto-complete the current command
+ */
+static void auto_complete() {
+    // Save current command if any
+    char partial_cmd[MAX_COMMAND_LENGTH];
+    strcpy(partial_cmd, command_buffer);
+    partial_cmd[buffer_position] = '\0';
+    
+    // List of available commands for autocompletion
+    const char *commands[] = {
+        "help", "clear", "echo", "ls", "cat", "meminfo", "memstat",
+        "memtest", "taskinfo", "reboot", "vgademo", "log", "vfs"
+    };
+    int command_count = sizeof(commands) / sizeof(commands[0]);
+    
+    // Find matching commands
+    const char *matches[command_count];
+    int match_count = 0;
+    int match_length = 0;
+    
+    for (int i = 0; i < command_count; i++) {
+        if (strncmp(partial_cmd, commands[i], strlen(partial_cmd)) == 0) {
+            matches[match_count++] = commands[i];
+            
+            // Calculate common prefix length for all matches
+            if (match_count == 1) {
+                match_length = strlen(commands[i]);
+            } else {
+                int j;
+                for (j = 0; j < match_length && j < strlen(commands[i]); j++) {
+                    if (matches[0][j] != commands[i][j]) {
+                        break;
+                    }
+                }
+                match_length = j;
+            }
+        }
+    }
+    
+    // No matches found
+    if (match_count == 0) {
+        return;
+    }
+    
+    // Single match - complete the command
+    if (match_count == 1) {
+        // Clear current content
+        for (int i = 0; i < buffer_position; i++) {
+            shell_print("\b \b");
+        }
+        
+        // Copy full command
+        strcpy(command_buffer, matches[0]);
+        buffer_position = strlen(command_buffer);
+        
+        // Display command
+        shell_print(command_buffer);
+        return;
+    }
+    
+    // Multiple matches - complete common prefix and show options
+    if (match_length > buffer_position) {
+        // Clear current content
+        for (int i = 0; i < buffer_position; i++) {
+            shell_print("\b \b");
+        }
+        
+        // Copy common prefix
+        strncpy(command_buffer, matches[0], match_length);
+        command_buffer[match_length] = '\0';
+        buffer_position = match_length;
+        
+        // Display common prefix
+        shell_print(command_buffer);
+        
+        // List all matches
+        shell_println("");
+        for (int i = 0; i < match_count; i++) {
+            shell_println(matches[i]);
+        }
+        shell_display_prompt();
+        shell_print(command_buffer);
+    }
+}
+
 // Shell I/O functions
 void shell_print(const char *str) {
     // Use VGA driver instead of direct display
@@ -115,6 +253,19 @@ void shell_display_prompt() {
     vga_set_color(old_color);
 }
 
+/**
+ * Special keys handling
+ */
+#define KEY_UP_ARROW    0x48
+#define KEY_DOWN_ARROW  0x50
+#define KEY_RIGHT_ARROW 0x4D
+#define KEY_LEFT_ARROW 0x4B
+#define KEY_HOME        0x47
+#define KEY_END         0x4F
+#define KEY_TAB         0x09
+#define KEY_DEL         0x53
+#define KEY_ESC         0x1B
+
 // Process a key input in the shell
 static void process_key(char key) {
     if (key == '\n') {
@@ -122,21 +273,107 @@ static void process_key(char key) {
         shell_println("");
         command_buffer[buffer_position] = 0; // Null terminate
         if (buffer_position > 0) {
+            add_to_history(command_buffer);
             shell_execute_command(command_buffer);
         }
         buffer_position = 0;
+        history_position = history_count;
         shell_display_prompt();
-    } else if (key == '\b') {
+    } 
+    else if (key == '\b') {
         // Backspace - delete a character
         if (buffer_position > 0) {
             buffer_position--;
             shell_print("\b \b"); // Erase character on screen
         }
-    } else if (buffer_position < MAX_COMMAND_LENGTH - 1) {
+    }
+    else if (key == KEY_TAB) {
+        // Tab key - auto-complete
+        auto_complete();
+    }
+    else if (key == KEY_UP_ARROW) {
+        // Up arrow - navigate history upward
+        if (history_position > 0) {
+            history_position--;
+            display_history_command(history_position);
+        }
+    }
+    else if (key == KEY_DOWN_ARROW) {
+        // Down arrow - navigate history downward
+        if (history_position < history_count - 1) {
+            history_position++;
+            display_history_command(history_position);
+        } else if (history_position == history_count - 1) {
+            // Clear the current line when reaching the end of history
+            history_position = history_count;
+            int i;
+            for (i = 0; i < buffer_position; i++) {
+                shell_print("\b \b");
+            }
+            buffer_position = 0;
+            command_buffer[0] = '\0';
+        }
+    }
+    else if (key == KEY_DEL) {
+        // Delete key - remove character at cursor
+        if (buffer_position < strlen(command_buffer)) {
+            // Shift characters to the left
+            for (int i = buffer_position; i < strlen(command_buffer); i++) {
+                command_buffer[i] = command_buffer[i + 1];
+            }
+            
+            // Redraw the line
+            int saved_pos = buffer_position;
+            shell_print("\r");
+            shell_display_prompt();
+            shell_print(command_buffer);
+            shell_print(" \b"); // Erase extra character at the end
+            
+            // Restore cursor position
+            for (int i = strlen(command_buffer); i > saved_pos; i--) {
+                shell_print("\b");
+            }
+        }
+    }
+    else if (key == KEY_HOME) {
+        // Home key - move cursor to start of line
+        int steps = buffer_position;
+        for (int i = 0; i < steps; i++) {
+            shell_print("\b");
+        }
+        buffer_position = 0;
+    }
+    else if (key == KEY_END) {
+        // End key - move cursor to end of line
+        int steps = strlen(command_buffer) - buffer_position;
+        for (int i = 0; i < steps; i++) {
+            shell_print("\033[C"); // ANSI forward
+        }
+        buffer_position = strlen(command_buffer);
+    }
+    else if (buffer_position < MAX_COMMAND_LENGTH - 1) {
         // Regular character - add to buffer
+        // Make room by shifting characters to the right
+        if (buffer_position < strlen(command_buffer)) {
+            for (int i = strlen(command_buffer); i >= buffer_position; i++) {
+                command_buffer[i + 1] = command_buffer[i];
+            }
+        }
+        
         command_buffer[buffer_position++] = key;
-        display_character(key, 15); // Echo character
-    } else {
+        
+        // Redraw the line from the current position
+        int i;
+        for (i = buffer_position - 1; command_buffer[i]; i++) {
+            display_character(command_buffer[i], 15);
+        }
+        
+        // Move cursor back to the insertion point
+        for (; i > buffer_position; i--) {
+            shell_print("\b");
+        }
+    } 
+    else {
         // Buffer is full, alert the user
         display_character('\a', 15); // Bell character as alert
     }
@@ -144,6 +381,7 @@ static void process_key(char key) {
 
 // Main shell loop
 void shell_run() {
+    log_info("SHELL", "Starting uintOS Shell");
     shell_println("Welcome to uintOS Shell!");
     shell_display_prompt();
     
@@ -158,6 +396,8 @@ void shell_run() {
 
 // Parse and execute a command
 void shell_execute_command(const char *command) {
+    log_debug("SHELL", "Executing command: %s", command);
+    
     char cmd_copy[MAX_COMMAND_LENGTH];
     strcpy(cmd_copy, command);
     
@@ -216,6 +456,7 @@ void shell_execute_command(const char *command) {
         } else if (strcmp(argv[0], "vfs") == 0) {
             cmd_vfs(argc, argv);
         } else {
+            log_warning("SHELL", "Unknown command: %s", argv[0]);
             shell_println("Unknown command. Type 'help' for a list of commands.");
         }
     }
@@ -224,10 +465,14 @@ void shell_execute_command(const char *command) {
 // Initialize the shell
 void shell_init() {
     buffer_position = 0;
+    history_count = 0;
+    history_position = -1;
+    log_info("SHELL", "Shell initialized");
 }
 
 // Command implementations
 void cmd_help(int argc, char *argv[]) {
+    log_debug("SHELL", "Executing help command");
     shell_println("uintOS Shell Commands:");
     shell_println("  help     - Display this help message");
     shell_println("  clear    - Clear the screen");
@@ -246,10 +491,12 @@ void cmd_help(int argc, char *argv[]) {
 
 void cmd_clear(int argc, char *argv[]) {
     // Use the VGA driver to clear the screen
+    log_debug("SHELL", "Clearing screen");
     vga_clear_screen();
 }
 
 void cmd_echo(int argc, char *argv[]) {
+    log_debug("SHELL", "Executing echo command");
     for (int i = 1; i < argc; i++) {
         shell_print(argv[i]);
         if (i < argc - 1) {
@@ -261,6 +508,7 @@ void cmd_echo(int argc, char *argv[]) {
 
 void cmd_meminfo(int argc, char *argv[]) {
     // Display memory information from the paging system
+    log_debug("SHELL", "Displaying memory information");
     shell_println("Memory Information:");
     shell_println("  Page Size: 4096 bytes");
     // You would get actual memory usage statistics here

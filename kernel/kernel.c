@@ -12,17 +12,54 @@
 #include "../filesystem/fat12.h"
 #include "../memory/paging.h"
 #include "../memory/heap.h"
-#include "../hal/include/hal.h"  // Include the HAL header
+#include "../hal/include/hal.h"
+#include "../kernel/graphics/graphics.h"
+#include "../kernel/logging/log.h"
+
+// Define system version constants
+#define SYSTEM_VERSION "1.0.0"
+#define SYSTEM_BUILD_DATE "April 30, 2025"
 
 // Paging structures
 #define PAGE_SIZE 4096
 #define PAGE_TABLE_ENTRIES 1024
 #define PAGE_DIRECTORY_ENTRIES 1024
 
+// Global variables
 unsigned int page_directory[PAGE_DIRECTORY_ENTRIES] __attribute__((aligned(PAGE_SIZE)));
 unsigned int page_table[PAGE_TABLE_ENTRIES] __attribute__((aligned(PAGE_SIZE)));
+int hal_initialized = 0;
 
+// Forward declarations
+void gdb_stub(void);
+void vga_demo(void);
+void initialize_system(void);
+void display_welcome_message(void);
+
+struct tss initial_task_state = {
+  .esp0 = 0x10000,
+  .ss0_r = DATA_SELECTOR,
+  .ss1_r = DATA_SELECTOR,
+  .esp1 = 0x10000,
+  .ss2_r = DATA_SELECTOR,
+  .eip = 0x0,
+  .esp2 = 0x10000,
+  .esp = 0x10000,
+  .eflags = 0x87,
+  .es_r = VIDEO_SELECTOR,
+  .cs_r = CODE_SELECTOR,
+  .ds_r = DATA_SELECTOR,
+  .ss_r = DATA_SELECTOR,
+  .fs_r = DATA_SELECTOR,
+  .gs_r = DATA_SELECTOR,
+};
+
+/**
+ * Initialize the paging system
+ */
 void initialize_paging() {
+    log_info("Initializing paging subsystem...");
+    
     // Map the first 4MB of memory
     for (int i = 0; i < PAGE_TABLE_ENTRIES; i++) {
         page_table[i] = (i * PAGE_SIZE) | 3; // Present and writable
@@ -44,79 +81,25 @@ void initialize_paging() {
     asm volatile("mov %%cr0, %0" : "=r"(cr0));
     cr0 |= 0x80000000; // Set the PG bit
     asm volatile("mov %0, %%cr0" : : "r"(cr0));
+    
+    log_info("Paging initialized successfully");
 }
 
-void kernel_entry();
-
-struct tss initial_task_state = {
-  .esp0 = 0x10000,
-  .ss0_r = DATA_SELECTOR,
-  .ss1_r = DATA_SELECTOR,
-  .esp1 = 0x10000,
-  .ss2_r = DATA_SELECTOR,
-  .eip = 0x0,
-  .esp2 = 0x10000,
-  .esp = 0x10000,
-  .eflags = 0x87,
-  .es_r = VIDEO_SELECTOR,
-  .cs_r = CODE_SELECTOR,
-  .ds_r = DATA_SELECTOR,
-  .ss_r = DATA_SELECTOR,
-  .fs_r = DATA_SELECTOR,
-  .gs_r = DATA_SELECTOR,
-};
-
-void kernel_entry() {
-  initialize_gdt(&initial_task_state);
-  initialize_irq();
-  set_data_segment(0x10);
-  set_stack_segment(0x10);
-  set_graphics_segment(0x28);
-  
-  // Initialize our new components
-  keyboard_init();
-  heap_init();
-  
-  // Welcome message
-  display_character('W', 15);
-  display_character('e', 15);
-  display_character('l', 15);
-  display_character('c', 15);
-  display_character('o', 15);
-  display_character('m', 15);
-  display_character('e', 15);
-  display_character(' ', 15);
-  display_character('t', 15);
-  display_character('o', 15);
-  display_character(' ', 15);
-  display_character('u', 15);
-  display_character('i', 15);
-  display_character('n', 15);
-  display_character('t', 15);
-  display_character('O', 15);
-  display_character('S', 15);
-  display_character('\n', 15);
-
-  // Enable LAPIC timer with periodic mode for task switching
-  uintos_lapic_enable_timer(UINTOS_TIMER_PERIODIC, 0x100, UINTOS_TIMER_DIV_128, 32);
-
-  // Start the shell (this will run in a loop)
-  shell_init();
-  shell_run();
-
-  // We should never reach here due to the shell's infinite loop
-  START_TASK(task1);
-  EXECUTE_TASK(task1);
-}
-
+/**
+ * Provides a breakpoint for debugging with GDB
+ */
 void gdb_stub() {
     asm volatile("int3"); // Trigger a breakpoint interrupt for GDB
 }
 
-// VGA demo function to show graphical capabilities
+/**
+ * Display VGA demo showing graphical capabilities
+ */
 void vga_demo() {
     // Save current color
     uint8_t old_color = vga_current_color;
+    
+    log_debug("Launching VGA demo...");
     
     // Clear screen with blue background
     vga_set_color(vga_entry_color(VGA_COLOR_WHITE, VGA_COLOR_BLUE));
@@ -145,8 +128,8 @@ void vga_demo() {
     vga_set_color(vga_entry_color(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLUE));
     vga_write_string_at("CPU: 1x86", 33, 6);
     vga_write_string_at("RAM: 16 MB", 33, 7);
-    vga_write_string_at("OS: uintOS v1.0", 33, 8);
-    vga_write_string_at("Date: April 2025", 33, 9);
+    vga_write_string_at("OS: uintOS " SYSTEM_VERSION, 33, 8);
+    vga_write_string_at("Date: " SYSTEM_BUILD_DATE, 33, 9);
     
     vga_set_color(vga_entry_color(VGA_COLOR_WHITE, VGA_COLOR_BLUE));
     vga_write_string_at("Keyboard Shortcuts:", 58, 5);
@@ -198,60 +181,114 @@ void vga_demo() {
     // Restore original color
     vga_set_color(old_color);
     vga_clear_screen();
+    
+    log_debug("VGA demo completed");
 }
 
-void kernel_main() {
+/**
+ * Display welcome message with version information
+ */
+void display_welcome_message() {
+    vga_set_color(vga_entry_color(VGA_COLOR_GREEN, VGA_COLOR_BLACK));
+    vga_write_string("uintOS (" SYSTEM_BUILD_DATE ") - Version " SYSTEM_VERSION "\n");
+    vga_write_string("-------------------------------------------\n");
+    vga_set_color(vga_entry_color(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK));
+    vga_write_string("Memory, filesystem, task and VGA subsystems initialized\n");
+    vga_write_string("Type 'help' for a list of available commands\n\n");
+    
+    log_info("System initialization completed successfully");
+}
+
+/**
+ * Initialize all system components
+ */
+void initialize_system() {
+    // Initialize logging first for early diagnostics
+    log_init(LOG_LEVEL_INFO);
+    log_info("uintOS " SYSTEM_VERSION " starting up...");
+    
     // Initialize memory management
     initialize_paging();
-    
-    // Initialize heap memory management
     heap_init();
-
+    
     // Initialize Hardware Abstraction Layer
+    log_info("Initializing Hardware Abstraction Layer...");
     int hal_status = hal_initialize();
     if (hal_status != 0) {
         // HAL initialization failed, fall back to direct hardware access
+        log_error("HAL initialization failed (status: %d), falling back to direct hardware access", hal_status);
         vga_init();
         vga_set_color(vga_entry_color(VGA_COLOR_RED, VGA_COLOR_BLACK));
-        vga_write_string("Warning: HAL initialization failed, falling back to direct hardware access\n");
+        vga_write_string("WARNING: HAL initialization failed, falling back to direct hardware access\n");
         vga_set_color(vga_entry_color(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK));
     } else {
         // HAL initialized successfully
+        hal_initialized = 1;
+        log_info("HAL initialized successfully");
         vga_init();
         vga_set_color(vga_entry_color(VGA_COLOR_GREEN, VGA_COLOR_BLACK));
         vga_write_string("HAL initialized successfully\n");
         vga_set_color(vga_entry_color(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK));
     }
     
-    // Display a nice VGA demo
-    vga_demo();
-    
     // Initialize file system
-    fat12_init();
+    log_info("Initializing filesystem...");
+    int fs_status = fat12_init();
+    if (fs_status != 0) {
+        log_warn("Filesystem initialization failed (status: %d)", fs_status);
+    } else {
+        log_info("Filesystem initialized successfully");
+    }
 
     // Initialize hardware and kernel subsystems
+    log_info("Initializing GDT and TSS...");
     initialize_gdt(&initial_task_state);
+    
+    log_info("Initializing interrupt system...");
     uintos_initialize_interrupts();
+    
+    log_info("Initializing multitasking...");
     initialize_multitasking();
     
     // Initialize keyboard driver with improved handling
+    log_info("Initializing keyboard driver...");
     keyboard_init();
     keyboard_flush(); // Clear any pending keys
     
     // Create system tasks with the new named task API
+    log_info("Creating system tasks...");
     create_named_task(idle_task, "System Idle");
     create_named_task(counter_task, "Background Counter");
     
     // Initialize shell interface with the enhanced filesystem commands
+    log_info("Initializing shell...");
     shell_init();
+    
+    log_info("System initialization complete");
+}
 
-    // Print welcome message using VGA functions
-    vga_set_color(vga_entry_color(VGA_COLOR_GREEN, VGA_COLOR_BLACK));
-    vga_write_string("uintOS (April 2025) - Enhanced Kernel with VGA Support\n");
-    vga_set_color(vga_entry_color(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK));
-    vga_write_string("Memory, filesystem, task and VGA subsystems initialized\n");
-    vga_write_string("Type 'help' for a list of available commands\n\n");
+/**
+ * Main kernel entry point
+ */
+void kernel_main() {
+    // Initialize all system components
+    initialize_system();
+    
+    // Show VGA demo screen on first boot
+    vga_demo();
+    
+    // Display welcome message
+    display_welcome_message();
     
     // Start the shell - this will run in a loop
+    log_info("Starting interactive shell");
     shell_run();
+    
+    // We should never reach here due to the shell's infinite loop
+    log_error("Shell terminated unexpectedly!");
+    
+    // If the shell somehow exits, halt the system
+    for (;;) {
+        asm("hlt");
+    }
 }
