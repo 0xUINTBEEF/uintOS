@@ -247,8 +247,63 @@ void initialize_system() {
     log_info("Initializing interrupt system...");
     uintos_initialize_interrupts();
     
+    // Configure and calibrate the system timer for preemptive scheduling
+    log_info("Configuring system timer for preemptive scheduling...");
+    if (hal_initialized) {
+        // Configure the timer using HAL
+        hal_timer_info_t timer_info;
+        hal_timer_get_info(0, &timer_info); // Get info for the first timer (LAPIC)
+        
+        hal_timer_calibrate(); // Calibrate the timer frequency
+        
+        // Configure timer for periodic interrupts at 100Hz (10ms intervals)
+        hal_timer_config_t timer_config = {
+            .mode = HAL_TIMER_PERIODIC,
+            .frequency = 100, // 100Hz = 10ms period
+            .vector = 32,     // IRQ0 = Vector 32 (timer)
+            .callback = NULL  // We'll handle it via the IRQ handler
+        };
+        
+        int timer_status = hal_timer_configure(0, &timer_config);
+        if (timer_status != 0) {
+            log_error("Failed to configure timer for preemptive scheduling");
+        } else {
+            hal_timer_start(0);
+            log_info("Preemptive scheduling timer configured successfully (100Hz)");
+        }
+    } else {
+        // Direct hardware access for timer configuration
+        log_info("Configuring PIT timer for preemptive scheduling...");
+        
+        // PIT runs at 1.193182 MHz, divisor = 11932 gives ~100Hz
+        uint16_t divisor = 11932; 
+        
+        // Set PIT mode 3 (square wave)
+        outb(0x43, 0x36);
+        
+        // Set divisor (low byte, then high byte)
+        outb(0x40, divisor & 0xFF);
+        outb(0x40, (divisor >> 8) & 0xFF);
+        
+        // Unmask IRQ0 (timer) in PIC
+        outb(0x21, inb(0x21) & 0xFE);
+        
+        log_info("PIT timer configured for preemptive scheduling (100Hz)");
+    }
+    
+    // Initialize task management
     log_info("Initializing multitasking...");
     initialize_multitasking();
+    
+    // Initialize threading system
+    log_info("Initializing threading system...");
+    thread_init();
+    log_info("Threading system initialized");
+    
+    // Initialize inter-process communication (IPC)
+    log_info("Initializing IPC subsystem...");
+    ipc_init();
+    log_info("IPC subsystem initialized");
     
     // Initialize keyboard driver with improved handling
     log_info("Initializing keyboard driver...");

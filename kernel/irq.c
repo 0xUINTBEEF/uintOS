@@ -814,8 +814,8 @@ UINTOS_TASK_END(uintos_irq14);
 UINTOS_TASK_START(uintos_irq32, uintos_handle_lapic_timer);
 int uintos_active_task_id = 1;
 void uintos_handle_lapic_timer() {
-    // Simple round-robin task switching between two tasks
-    uintos_active_task_id = (uintos_active_task_id == 1) ? 2 : 1;
+    // Preemptive task scheduling - this will be called on every timer tick
+    switch_task();
 
     // Acknowledge the interrupt
     uintos_lapic_isr_complete();
