@@ -1,5 +1,6 @@
 #include "gdt.h"
 #include "asm.h"
+#include "security.h"
 #include <inttypes.h>
 
 #pragma once
@@ -122,13 +123,57 @@ extern struct uintos_tss uintos_init_tss;
         asm("jmp FAR PTR  [esp]");                                            \
     }
 
+// Task state definitions
+#define TASK_STATE_UNUSED    0
+#define TASK_STATE_READY     1
+#define TASK_STATE_RUNNING   2
+#define TASK_STATE_BLOCKED   3
+#define TASK_STATE_SUSPENDED 4
+#define TASK_STATE_ZOMBIE    5
+
+// Task flags
+#define TASK_FLAG_SYSTEM     0x0001  // System task (privileged)
+#define TASK_FLAG_USER       0x0002  // User task (unprivileged)
+#define TASK_FLAG_KERNEL     0x0004  // Kernel task (highest privilege)
+#define TASK_FLAG_DRIVER     0x0008  // Driver task (device access)
+#define TASK_FLAG_SERVICE    0x0010  // System service task
+#define TASK_FLAG_DETACHED   0x0020  // No parent waiting for this task
+#define TASK_FLAG_ISOLATED   0x0040  // Memory isolation enforced
+
+// Task privilege levels (matches CPU rings)
+#define TASK_PRIV_KERNEL     0       // Kernel mode (ring 0)
+#define TASK_PRIV_DRIVER     1       // Driver mode (ring 1)
+#define TASK_PRIV_SYSTEM     2       // System services (ring 2)
+#define TASK_PRIV_USER       3       // User applications (ring 3)
+
+// Enhanced task structure with security attributes
+typedef struct {
+    int id;                          // Task ID
+    unsigned int state;              // Current state (UNUSED, READY, RUNNING, etc.)
+    unsigned int flags;              // Task flags (SYSTEM, USER, etc.)
+    unsigned int privilege_level;    // Privilege level (0-3)
+    unsigned int stack_size;         // Size of the task's stack
+    char name[64];                   // Task name
+    void* stack;                     // Task stack
+    void* entry_point;               // Task entry point
+    uint32_t cr3;                    // Page directory physical address
+    security_token_t* security_token;// Security token for the task
+    security_descriptor_t* security_descriptor; // Security descriptor for access control
+    int exit_code;                   // Task exit code
+    int parent_id;                   // Parent task ID
+} task_t;
+
 // Task information structure for status reporting
 typedef struct {
     int id;                  // Task ID
-    unsigned int state;      // Current state (UNUSED, READY, RUNNING)
+    unsigned int state;      // Current state
+    unsigned int flags;      // Task flags
+    unsigned int privilege_level; // Privilege level (0-3)
     unsigned int stack_size; // Size of the task's stack
-    const char* name;        // Task name (or "Unknown")
+    char name[64];           // Task name
     int is_current;          // Whether this is the currently running task
+    int parent_id;           // Parent task ID
+    security_sid_t user_sid; // User SID from security token
 } task_info_t;
 
 // Enhanced task management APIs
@@ -139,16 +184,26 @@ int get_current_task_id(void);
 int get_task_info(int task_id, task_info_t *info);
 int create_named_task(void (*entry_point)(), const char *name);
 
+// Security-enhanced task management APIs
+int create_secure_task(void (*entry_point)(), const char *name, unsigned int flags, unsigned int privilege_level);
+int set_task_security_token(int task_id, security_token_t* token);
+security_token_t* get_task_security_token(int task_id);
+int set_task_security_descriptor(int task_id, security_descriptor_t* descriptor);
+security_descriptor_t* get_task_security_descriptor(int task_id);
+int task_check_permission(int task_id, uint32_t permission);
+int check_access_to_task(int task_id, uint32_t desired_access);
+int suspend_task(int task_id);
+int resume_task(int task_id);
+int terminate_task(int task_id, int exit_code);
+int get_task_exit_code(int task_id, int* exit_code);
+int wait_for_task(int task_id);
+int create_user_mode_task(void (*entry_point)(), const char* name, size_t stack_size);
+
 // Basic task management functions for the simple scheduler
 void create_task(void (*entry_point)());
 void switch_task();
 void initialize_multitasking();
 void set_task_switching(unsigned int enabled);
-
-// Task state definitions
-#define TASK_STATE_UNUSED 0
-#define TASK_STATE_READY 1
-#define TASK_STATE_RUNNING 2
 
 #define UINTOS_INIT_TASK(name) name ## _init()
 #define UINTOS_RUN_TASK(name) name ## _start()

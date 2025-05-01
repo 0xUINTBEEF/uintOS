@@ -211,6 +211,15 @@ void initialize_system() {
     initialize_paging();
     heap_init();
     
+    // Initialize Security Subsystem (after memory management, before peripherals)
+    log_info("Initializing security subsystem...");
+    int security_status = security_init();
+    if (security_status != 0) {
+        log_error("Security subsystem initialization failed (status: %d)", security_status);
+    } else {
+        log_info("Security subsystem initialized successfully");
+    }
+    
     // Initialize Hardware Abstraction Layer
     log_info("Initializing Hardware Abstraction Layer...");
     int hal_status = hal_initialize();
