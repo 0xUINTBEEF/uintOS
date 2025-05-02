@@ -94,4 +94,4 @@ uintOS is an educational operating system that demonstrates OS concepts, kernel 
 MIT License
 
 ---
-*Last Updated: May 2, 2025*
+*Last Updated: May 3, 2025*

@@ -461,6 +461,8 @@ void shell_execute_command(const char *command) {
             cmd_wdm(argc, argv);  // New Windows driver command
         } else if (strcmp(argv[0], "usb") == 0) {
             cmd_usb(argc, argv);  // New USB command
+        } else if (strcmp(argv[0], "vm") == 0) {
+            cmd_vm(argc, argv);  // New VM management command
         } else {
             log_warning("SHELL", "Unknown command: %s", argv[0]);
             shell_println("Unknown command. Type 'help' for a list of commands.");
@@ -496,6 +498,7 @@ void cmd_help(int argc, char *argv[]) {
     shell_println("  vfs      - Virtual filesystem operations");
     shell_println("  wdm      - Windows driver management");
     shell_println("  usb      - USB subsystem management");
+    shell_println("  vm       - Manage virtual machines");
 }
 
 void cmd_clear(int argc, char *argv[]) {
@@ -2231,4 +2234,514 @@ void cmd_taskman(int argc, char *argv[]) {
     vga_clear_screen();
     
     log_debug("SHELL", "Task Manager UI exited");
+}
+
+// VM management command implementation
+void cmd_vm(int argc, char *argv[]) {
+    // Include necessary headers
+    #include "virtualization/vmx.h"
+    #include "virtualization/vm_memory.h"
+    
+    if (argc == 1) {
+        // Display usage information if no arguments
+        shell_println("Virtual Machine Management Commands:");
+        shell_println("  vm init        - Initialize virtualization subsystem");
+        shell_println("  vm create <name> <memory_kb> <vcpus> - Create a new virtual machine");
+        shell_println("  vm delete <id>  - Delete a virtual machine");
+        shell_println("  vm start <id>   - Start a virtual machine");
+        shell_println("  vm stop <id>    - Stop a virtual machine");
+        shell_println("  vm pause <id>   - Pause a running virtual machine");
+        shell_println("  vm resume <id>  - Resume a paused virtual machine");
+        shell_println("  vm list         - List all virtual machines");
+        shell_println("  vm info <id>    - Display detailed information about a VM");
+        shell_println("  vm load <id> <image> - Load a kernel image into a VM");
+        shell_println("");
+        shell_println("Examples:");
+        shell_println("  vm create myvm 65536 1    - Create a VM with 64MB RAM and 1 vCPU");
+        shell_println("  vm start 1               - Start VM with ID 1");
+        return;
+    }
+    
+    // Handle virtualization commands
+    if (strcmp(argv[1], "init") == 0) {
+        shell_println("Initializing virtualization subsystem...");
+        
+        // Check if VMX is supported
+        if (!vmx_is_supported()) {
+            shell_println("Error: CPU does not support virtualization extensions (VMX).");
+            return;
+        }
+        
+        // Initialize VMX
+        int result = vmx_init();
+        if (result != 0) {
+            shell_println("Error: Failed to initialize VMX subsystem.");
+            return;
+        }
+        
+        // Initialize VM memory subsystem
+        result = vm_memory_init();
+        if (result != 0) {
+            shell_println("Error: Failed to initialize VM memory subsystem.");
+            return;
+        }
+        
+        shell_println("Virtualization subsystem initialized successfully.");
+    }
+    else if (strcmp(argv[1], "create") == 0) {
+        // Create a new VM
+        if (argc < 5) {
+            shell_println("Usage: vm create <name> <memory_kb> <vcpus>");
+            return;
+        }
+        
+        const char* name = argv[2];
+        
+        // Parse memory size
+        uint32_t memory_kb = 0;
+        for (int i = 0; argv[3][i]; i++) {
+            if (argv[3][i] >= '0' && argv[3][i] <= '9') {
+                memory_kb = memory_kb * 10 + (argv[3][i] - '0');
+            } else {
+                shell_println("Error: Invalid memory size.");
+                return;
+            }
+        }
+        
+        // Parse vCPU count
+        uint32_t vcpus = 0;
+        for (int i = 0; argv[4][i]; i++) {
+            if (argv[4][i] >= '0' && argv[4][i] <= '9') {
+                vcpus = vcpus * 10 + (argv[4][i] - '0');
+            } else {
+                shell_println("Error: Invalid vCPU count.");
+                return;
+            }
+        }
+        
+        // Validate parameters
+        if (memory_kb < 4096) {
+            shell_println("Error: Memory size must be at least 4096 KB (4 MB).");
+            return;
+        }
+        
+        if (vcpus < 1 || vcpus > 16) {
+            shell_println("Error: vCPU count must be between 1 and 16.");
+            return;
+        }
+        
+        // Create the VM
+        shell_print("Creating VM '");
+        shell_print(name);
+        shell_print("' with ");
+        
+        // Display memory in appropriate units
+        if (memory_kb >= 1024*1024) {
+            char gb_str[16];
+            int_to_string(memory_kb / (1024*1024), gb_str);
+            shell_print(gb_str);
+            shell_print(" GB");
+        } else if (memory_kb >= 1024) {
+            char mb_str[16];
+            int_to_string(memory_kb / 1024, mb_str);
+            shell_print(mb_str);
+            shell_print(" MB");
+        } else {
+            char kb_str[16];
+            int_to_string(memory_kb, kb_str);
+            shell_print(kb_str);
+            shell_print(" KB");
+        }
+        
+        shell_print(" memory and ");
+        char vcpu_str[16];
+        int_to_string(vcpus, vcpu_str);
+        shell_print(vcpu_str);
+        shell_println(" vCPU(s)...");
+        
+        int vm_id = vmx_create_vm(name, memory_kb, vcpus);
+        if (vm_id < 0) {
+            shell_println("Error: Failed to create virtual machine.");
+            return;
+        }
+        
+        shell_print("VM created successfully with ID: ");
+        char id_str[16];
+        int_to_string(vm_id, id_str);
+        shell_println(id_str);
+    }
+    else if (strcmp(argv[1], "delete") == 0) {
+        // Delete a VM
+        if (argc < 3) {
+            shell_println("Usage: vm delete <id>");
+            return;
+        }
+        
+        // Parse VM ID
+        int vm_id = 0;
+        for (int i = 0; argv[2][i]; i++) {
+            if (argv[2][i] >= '0' && argv[2][i] <= '9') {
+                vm_id = vm_id * 10 + (argv[2][i] - '0');
+            } else {
+                shell_println("Error: Invalid VM ID.");
+                return;
+            }
+        }
+        
+        // Delete the VM
+        shell_print("Deleting VM with ID ");
+        shell_print(argv[2]);
+        shell_println("...");
+        
+        int result = vmx_delete_vm(vm_id);
+        if (result != 0) {
+            shell_println("Error: Failed to delete VM. It may be running or not exist.");
+            return;
+        }
+        
+        shell_println("VM deleted successfully.");
+    }
+    else if (strcmp(argv[1], "start") == 0) {
+        // Start a VM
+        if (argc < 3) {
+            shell_println("Usage: vm start <id>");
+            return;
+        }
+        
+        // Parse VM ID
+        int vm_id = 0;
+        for (int i = 0; argv[2][i]; i++) {
+            if (argv[2][i] >= '0' && argv[2][i] <= '9') {
+                vm_id = vm_id * 10 + (argv[2][i] - '0');
+            } else {
+                shell_println("Error: Invalid VM ID.");
+                return;
+            }
+        }
+        
+        // Start the VM
+        shell_print("Starting VM with ID ");
+        shell_print(argv[2]);
+        shell_println("...");
+        
+        int result = vmx_start_vm(vm_id);
+        if (result != 0) {
+            shell_println("Error: Failed to start VM. It may already be running or not exist.");
+            return;
+        }
+        
+        shell_println("VM started successfully.");
+    }
+    else if (strcmp(argv[1], "stop") == 0) {
+        // Stop a VM
+        if (argc < 3) {
+            shell_println("Usage: vm stop <id>");
+            return;
+        }
+        
+        // Parse VM ID
+        int vm_id = 0;
+        for (int i = 0; argv[2][i]; i++) {
+            if (argv[2][i] >= '0' && argv[2][i] <= '9') {
+                vm_id = vm_id * 10 + (argv[2][i] - '0');
+            } else {
+                shell_println("Error: Invalid VM ID.");
+                return;
+            }
+        }
+        
+        // Stop the VM
+        shell_print("Stopping VM with ID ");
+        shell_print(argv[2]);
+        shell_println("...");
+        
+        int result = vmx_stop_vm(vm_id);
+        if (result != 0) {
+            shell_println("Error: Failed to stop VM. It may not be running or not exist.");
+            return;
+        }
+        
+        shell_println("VM stopped successfully.");
+    }
+    else if (strcmp(argv[1], "pause") == 0) {
+        // Pause a VM
+        if (argc < 3) {
+            shell_println("Usage: vm pause <id>");
+            return;
+        }
+        
+        // Parse VM ID
+        int vm_id = 0;
+        for (int i = 0; argv[2][i]; i++) {
+            if (argv[2][i] >= '0' && argv[2][i] <= '9') {
+                vm_id = vm_id * 10 + (argv[2][i] - '0');
+            } else {
+                shell_println("Error: Invalid VM ID.");
+                return;
+            }
+        }
+        
+        // Pause the VM
+        shell_print("Pausing VM with ID ");
+        shell_print(argv[2]);
+        shell_println("...");
+        
+        int result = vmx_pause_vm(vm_id);
+        if (result != 0) {
+            shell_println("Error: Failed to pause VM. It may not be running or not exist.");
+            return;
+        }
+        
+        shell_println("VM paused successfully.");
+    }
+    else if (strcmp(argv[1], "resume") == 0) {
+        // Resume a VM
+        if (argc < 3) {
+            shell_println("Usage: vm resume <id>");
+            return;
+        }
+        
+        // Parse VM ID
+        int vm_id = 0;
+        for (int i = 0; argv[2][i]; i++) {
+            if (argv[2][i] >= '0' && argv[2][i] <= '9') {
+                vm_id = vm_id * 10 + (argv[2][i] - '0');
+            } else {
+                shell_println("Error: Invalid VM ID.");
+                return;
+            }
+        }
+        
+        // Resume the VM
+        shell_print("Resuming VM with ID ");
+        shell_print(argv[2]);
+        shell_println("...");
+        
+        int result = vmx_resume_vm(vm_id);
+        if (result != 0) {
+            shell_println("Error: Failed to resume VM. It may not be paused or not exist.");
+            return;
+        }
+        
+        shell_println("VM resumed successfully.");
+    }
+    else if (strcmp(argv[1], "list") == 0) {
+        // List all VMs
+        vm_instance_t vms[MAX_VMS];
+        int count = vmx_list_vms(vms, MAX_VMS);
+        
+        if (count < 0) {
+            shell_println("Error: Failed to list VMs.");
+            return;
+        }
+        
+        if (count == 0) {
+            shell_println("No virtual machines found.");
+            return;
+        }
+        
+        // Display VM table header
+        shell_println("ID | Name                 | Memory       | vCPUs | State");
+        shell_println("---+----------------------+--------------+-------+------------");
+        
+        // Display each VM
+        for (int i = 0; i < count; i++) {
+            // ID column
+            char id_str[8];
+            int_to_string(vms[i].id, id_str);
+            
+            // Add padding for ID
+            int padding = 2 - strlen(id_str);
+            while (padding-- > 0) {
+                shell_print(" ");
+            }
+            
+            shell_print(id_str);
+            shell_print(" | ");
+            
+            // Name column
+            shell_print(vms[i].name);
+            padding = 20 - strlen(vms[i].name);
+            while (padding-- > 0) {
+                shell_print(" ");
+            }
+            shell_print(" | ");
+            
+            // Memory column
+            char mem_str[16];
+            if (vms[i].allocated_memory >= 1024*1024) {
+                int_to_string(vms[i].allocated_memory / (1024*1024), mem_str);
+                shell_print(mem_str);
+                shell_print(" GB");
+                padding = 10 - strlen(mem_str) - 3;
+            } else if (vms[i].allocated_memory >= 1024) {
+                int_to_string(vms[i].allocated_memory / 1024, mem_str);
+                shell_print(mem_str);
+                shell_print(" MB");
+                padding = 10 - strlen(mem_str) - 3;
+            } else {
+                int_to_string(vms[i].allocated_memory, mem_str);
+                shell_print(mem_str);
+                shell_print(" KB");
+                padding = 10 - strlen(mem_str) - 3;
+            }
+            while (padding-- > 0) {
+                shell_print(" ");
+            }
+            shell_print(" | ");
+            
+            // vCPUs column
+            char vcpu_str[8];
+            int_to_string(vms[i].vcpu_count, vcpu_str);
+            shell_print(vcpu_str);
+            padding = 5 - strlen(vcpu_str);
+            while (padding-- > 0) {
+                shell_print(" ");
+            }
+            shell_print(" | ");
+            
+            // State column
+            const char* state;
+            switch (vms[i].state) {
+                case VM_STATE_READY:      state = "Ready"; break;
+                case VM_STATE_RUNNING:    state = "Running"; break;
+                case VM_STATE_PAUSED:     state = "Paused"; break;
+                case VM_STATE_ERROR:      state = "Error"; break;
+                case VM_STATE_TERMINATED: state = "Terminated"; break;
+                default:                  state = "Unknown"; break;
+            }
+            shell_println(state);
+        }
+        
+        // Display summary
+        char count_str[16];
+        int_to_string(count, count_str);
+        shell_print("Total: ");
+        shell_print(count_str);
+        shell_println(" virtual machines");
+    }
+    else if (strcmp(argv[1], "info") == 0) {
+        // Display detailed VM info
+        if (argc < 3) {
+            shell_println("Usage: vm info <id>");
+            return;
+        }
+        
+        // Parse VM ID
+        int vm_id = 0;
+        for (int i = 0; argv[2][i]; i++) {
+            if (argv[2][i] >= '0' && argv[2][i] <= '9') {
+                vm_id = vm_id * 10 + (argv[2][i] - '0');
+            } else {
+                shell_println("Error: Invalid VM ID.");
+                return;
+            }
+        }
+        
+        // Get VM info
+        vm_instance_t vm;
+        int result = vmx_get_vm_info(vm_id, &vm);
+        if (result != 0) {
+            shell_println("Error: VM not found.");
+            return;
+        }
+        
+        // Display VM information
+        shell_println("Virtual Machine Information:");
+        
+        shell_print("  ID:      ");
+        char id_str[16];
+        int_to_string(vm.id, id_str);
+        shell_println(id_str);
+        
+        shell_print("  Name:    ");
+        shell_println(vm.name);
+        
+        shell_print("  Memory:  ");
+        char mem_str[16];
+        if (vm.allocated_memory >= 1024*1024) {
+            int_to_string(vm.allocated_memory / (1024*1024), mem_str);
+            shell_print(mem_str);
+            shell_println(" GB");
+        } else if (vm.allocated_memory >= 1024) {
+            int_to_string(vm.allocated_memory / 1024, mem_str);
+            shell_print(mem_str);
+            shell_println(" MB");
+        } else {
+            int_to_string(vm.allocated_memory, mem_str);
+            shell_print(mem_str);
+            shell_println(" KB");
+        }
+        
+        shell_print("  vCPUs:   ");
+        char vcpu_str[8];
+        int_to_string(vm.vcpu_count, vcpu_str);
+        shell_println(vcpu_str);
+        
+        shell_print("  State:   ");
+        switch (vm.state) {
+            case VM_STATE_READY:      shell_println("Ready"); break;
+            case VM_STATE_RUNNING:    shell_println("Running"); break;
+            case VM_STATE_PAUSED:     shell_println("Paused"); break;
+            case VM_STATE_ERROR:      shell_println("Error"); break;
+            case VM_STATE_TERMINATED: shell_println("Terminated"); break;
+            default:                  shell_println("Unknown"); break;
+        }
+        
+        shell_print("  Type:    ");
+        switch (vm.type) {
+            case VM_TYPE_NORMAL:   shell_println("Normal"); break;
+            case VM_TYPE_PARAVIRT: shell_println("Paravirtualized"); break;
+            case VM_TYPE_FULLVIRT: shell_println("Fully Virtualized"); break;
+            default:               shell_println("Unknown"); break;
+        }
+        
+        // Display CR3 (page directory) in hex
+        shell_print("  CR3:     0x");
+        char cr3_str[16] = "00000000";
+        for (int i = 7, val = vm.cr3; i >= 0; i--, val >>= 4) {
+            cr3_str[i] = "0123456789ABCDEF"[val & 0xF];
+        }
+        shell_println(cr3_str);
+        
+        // Additional information could be shown here for a more detailed view
+    }
+    else if (strcmp(argv[1], "load") == 0) {
+        // Load a kernel image into VM
+        if (argc < 4) {
+            shell_println("Usage: vm load <id> <image_path>");
+            return;
+        }
+        
+        // Parse VM ID
+        int vm_id = 0;
+        for (int i = 0; argv[2][i]; i++) {
+            if (argv[2][i] >= '0' && argv[2][i] <= '9') {
+                vm_id = vm_id * 10 + (argv[2][i] - '0');
+            } else {
+                shell_println("Error: Invalid VM ID.");
+                return;
+            }
+        }
+        
+        const char* image_path = argv[3];
+        
+        // Load the kernel image
+        shell_print("Loading kernel image '");
+        shell_print(image_path);
+        shell_print("' into VM ");
+        shell_print(argv[2]);
+        shell_println("...");
+        
+        int result = vmx_load_kernel(vm_id, image_path);
+        if (result != 0) {
+            shell_println("Error: Failed to load kernel image.");
+            return;
+        }
+        
+        shell_println("Kernel image loaded successfully.");
+    }
+    else {
+        shell_println("Unknown VM command. Try 'vm' for help.");
+    }
 }

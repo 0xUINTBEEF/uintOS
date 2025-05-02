@@ -15,6 +15,8 @@
 #include "../hal/include/hal.h"
 #include "../kernel/graphics/graphics.h"
 #include "../kernel/logging/log.h"
+#include "../kernel/virtualization/vmx.h"
+#include "../kernel/virtualization/vm_memory.h"
 
 // Define system version constants
 #define SYSTEM_VERSION "1.0.0"
