@@ -204,28 +204,28 @@ void display_welcome_message() {
  */
 void initialize_system() {
     // Initialize logging first for early diagnostics
-    log_init(LOG_LEVEL_INFO);
-    log_info("uintOS " SYSTEM_VERSION " starting up...");
+    log_init(LOG_LEVEL_INFO, LOG_DEST_SCREEN | LOG_DEST_MEMORY, LOG_FORMAT_LEVEL | LOG_FORMAT_SOURCE | LOG_FORMAT_TIMESTAMP);
+    log_info("KERNEL", "uintOS " SYSTEM_VERSION " starting up...");
     
     // Initialize memory management
     initialize_paging();
     heap_init();
     
     // Initialize Security Subsystem (after memory management, before peripherals)
-    log_info("Initializing security subsystem...");
+    log_info("KERNEL", "Initializing security subsystem...");
     int security_status = security_init();
     if (security_status != 0) {
-        log_error("Security subsystem initialization failed (status: %d)", security_status);
+        log_error("KERNEL", "Security subsystem initialization failed (status: %d)", security_status);
     } else {
-        log_info("Security subsystem initialized successfully");
+        log_info("KERNEL", "Security subsystem initialized successfully");
     }
     
     // Initialize Hardware Abstraction Layer
-    log_info("Initializing Hardware Abstraction Layer...");
+    log_info("KERNEL", "Initializing Hardware Abstraction Layer...");
     int hal_status = hal_initialize();
     if (hal_status != 0) {
         // HAL initialization failed, fall back to direct hardware access
-        log_error("HAL initialization failed (status: %d), falling back to direct hardware access", hal_status);
+        log_error("KERNEL", "HAL initialization failed (status: %d), falling back to direct hardware access", hal_status);
         vga_init();
         vga_set_color(vga_entry_color(VGA_COLOR_RED, VGA_COLOR_BLACK));
         vga_write_string("WARNING: HAL initialization failed, falling back to direct hardware access\n");
@@ -233,31 +233,22 @@ void initialize_system() {
     } else {
         // HAL initialized successfully
         hal_initialized = 1;
-        log_info("HAL initialized successfully");
+        log_info("KERNEL", "HAL initialized successfully");
         vga_init();
         vga_set_color(vga_entry_color(VGA_COLOR_GREEN, VGA_COLOR_BLACK));
         vga_write_string("HAL initialized successfully\n");
         vga_set_color(vga_entry_color(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK));
     }
     
-    // Initialize file system
-    log_info("Initializing filesystem...");
-    int fs_status = fat12_init();
-    if (fs_status != 0) {
-        log_warn("Filesystem initialization failed (status: %d)", fs_status);
-    } else {
-        log_info("Filesystem initialized successfully");
-    }
-
     // Initialize hardware and kernel subsystems
-    log_info("Initializing GDT and TSS...");
+    log_info("KERNEL", "Initializing GDT and TSS...");
     initialize_gdt(&initial_task_state);
     
-    log_info("Initializing interrupt system...");
+    log_info("KERNEL", "Initializing interrupt system...");
     uintos_initialize_interrupts();
     
     // Configure and calibrate the system timer for preemptive scheduling
-    log_info("Configuring system timer for preemptive scheduling...");
+    log_info("KERNEL", "Configuring system timer for preemptive scheduling...");
     if (hal_initialized) {
         // Configure the timer using HAL
         hal_timer_info_t timer_info;
@@ -275,14 +266,14 @@ void initialize_system() {
         
         int timer_status = hal_timer_configure(0, &timer_config);
         if (timer_status != 0) {
-            log_error("Failed to configure timer for preemptive scheduling");
+            log_error("KERNEL", "Failed to configure timer for preemptive scheduling");
         } else {
             hal_timer_start(0);
-            log_info("Preemptive scheduling timer configured successfully (100Hz)");
+            log_info("KERNEL", "Preemptive scheduling timer configured successfully (100Hz)");
         }
     } else {
         // Direct hardware access for timer configuration
-        log_info("Configuring PIT timer for preemptive scheduling...");
+        log_info("KERNEL", "Configuring PIT timer for preemptive scheduling...");
         
         // PIT runs at 1.193182 MHz, divisor = 11932 gives ~100Hz
         uint16_t divisor = 11932; 
@@ -297,38 +288,62 @@ void initialize_system() {
         // Unmask IRQ0 (timer) in PIC
         outb(0x21, inb(0x21) & 0xFE);
         
-        log_info("PIT timer configured for preemptive scheduling (100Hz)");
+        log_info("KERNEL", "PIT timer configured for preemptive scheduling (100Hz)");
     }
     
     // Initialize task management
-    log_info("Initializing multitasking...");
+    log_info("KERNEL", "Initializing multitasking...");
     initialize_multitasking();
     
     // Initialize threading system
-    log_info("Initializing threading system...");
+    log_info("KERNEL", "Initializing threading system...");
     thread_init();
-    log_info("Threading system initialized");
+    log_info("KERNEL", "Threading system initialized");
     
     // Initialize inter-process communication (IPC)
-    log_info("Initializing IPC subsystem...");
+    log_info("KERNEL", "Initializing IPC subsystem...");
     ipc_init();
-    log_info("IPC subsystem initialized");
+    log_info("KERNEL", "IPC subsystem initialized");
     
     // Initialize keyboard driver with improved handling
-    log_info("Initializing keyboard driver...");
+    log_info("KERNEL", "Initializing keyboard driver...");
     keyboard_init();
     keyboard_flush(); // Clear any pending keys
+
+    // Initialize the Virtual Filesystem System
+    log_info("KERNEL", "Initializing Virtual Filesystem System...");
+    vfs_init();
+    
+    // Register all filesystem types with the VFS
+    log_info("KERNEL", "Registering filesystem types...");
+    register_fat12_with_vfs(); // Register FAT12
+    register_ext2_with_vfs();  // Register ext2
+    register_iso9660_with_vfs(); // Register ISO9660
+    
+    // Initialize individual filesystems
+    log_info("KERNEL", "Initializing filesystem drivers...");
+    fat12_init();
+    ext2_init("ext2_disk");
+    iso9660_init("cdrom");
+    
+    // Mount filesystems
+    log_info("KERNEL", "Mounting filesystems...");
+    vfs_mount("fat12", "fat12_disk", "/fat", 0);
+    vfs_mount("ext2", "ext2_disk", "/ext2", 0);
+    vfs_mount("iso9660", "cdrom", "/cdrom", 0);
+    
+    log_info("KERNEL", "All filesystems registered and mounted");
     
     // Create system tasks with the new named task API
-    log_info("Creating system tasks...");
+    log_info("KERNEL", "Creating system tasks...");
     create_named_task(idle_task, "System Idle");
     create_named_task(counter_task, "Background Counter");
     
     // Initialize shell interface with the enhanced filesystem commands
-    log_info("Initializing shell...");
+    log_info("KERNEL", "Initializing shell...");
     shell_init();
     
-    log_info("System initialization complete");
+    log_info("KERNEL", "System initialization complete");
 }
 
 /**

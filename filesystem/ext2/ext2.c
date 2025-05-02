@@ -373,17 +373,172 @@ int ext2_chown(const char* path, uint16_t uid, uint16_t gid) {
 
 // Internal function implementations
 
-// Read a block from the filesystem
+// Function to read a block from the filesystem
 static int read_block(uint32_t block_num, void* buffer) {
-    // This would use disk I/O functions to read the block
-    // For simplicity, we'll just return success
+    // This would normally use disk I/O functions to read from a disk device
+    // For this implementation, we'll simulate a basic ext2 filesystem in memory
+    
+    static int initialized = 0;
+    static uint8_t fs_image[4 * 1024 * 1024];  // 4MB simulated filesystem
+    
+    // Initialize filesystem image with a basic ext2 structure on first use
+    if (!initialized) {
+        initialized = 1;
+        
+        // Create superblock
+        ext2_superblock_t* sb = (ext2_superblock_t*)(fs_image + 1024); // Superblock starts at offset 1024
+        memset(sb, 0, sizeof(ext2_superblock_t));
+        
+        sb->inodes_count = 1024;
+        sb->blocks_count = 4096;
+        sb->reserved_blocks_count = 10;
+        sb->free_blocks_count = 3800;
+        sb->free_inodes_count = 1000;
+        sb->first_data_block = 1;
+        sb->log_block_size = 0;  // 1024 bytes per block
+        sb->log_frag_size = 0;
+        sb->blocks_per_group = 8192;
+        sb->frags_per_group = 8192;
+        sb->inodes_per_group = 1024;
+        sb->magic = EXT2_SUPER_MAGIC;
+        sb->state = 1;  // Clean filesystem
+        sb->errors = 1;  // Ignore errors
+        
+        // Create block group descriptor
+        ext2_group_desc_t* gd = (ext2_group_desc_t*)(fs_image + 2048); // Start of block group descriptors
+        gd->block_bitmap = 3;
+        gd->inode_bitmap = 4;
+        gd->inode_table = 5;
+        gd->free_blocks_count = 3800;
+        gd->free_inodes_count = 1000;
+        gd->used_dirs_count = 1;  // Root directory
+        
+        // Allocate inode and block bitmaps
+        memset(fs_image + 3 * 1024, 0xFF, 1024);  // Mark all blocks as used in bitmap (for simplicity)
+        memset(fs_image + 4 * 1024, 0xFF, 1024);  // Mark all inodes as used in bitmap (for simplicity)
+        
+        // Create root directory inode (inode #2)
+        ext2_inode_t* root_inode = (ext2_inode_t*)(fs_image + 5 * 1024 + sizeof(ext2_inode_t)); // Inode table starts at block 5
+        root_inode->mode = EXT2_S_IFDIR | 0755;
+        root_inode->size = 1024;  // Directory size
+        root_inode->blocks = 2;   // Number of 512-byte blocks
+        root_inode->block[0] = 20;  // Data block for root directory
+        
+        // Create root directory entries
+        ext2_dir_entry_t* dir = (ext2_dir_entry_t*)(fs_image + 20 * 1024);
+        
+        // "." entry (current directory)
+        dir->inode = 2;  // Root inode
+        dir->rec_len = 12;
+        dir->name_len = 1;
+        dir->file_type = 2;  // Directory
+        dir->name[0] = '.';
+        
+        // ".." entry (parent directory, for root it's itself)
+        dir = (ext2_dir_entry_t*)((char*)dir + dir->rec_len);
+        dir->inode = 2;  // Root inode
+        dir->rec_len = 12;
+        dir->name_len = 2;
+        dir->file_type = 2;  // Directory
+        dir->name[0] = '.';
+        dir->name[1] = '.';
+        
+        // "home" directory entry
+        dir = (ext2_dir_entry_t*)((char*)dir + dir->rec_len);
+        dir->inode = 11;  // Arbitrary inode number
+        dir->rec_len = 16;
+        dir->name_len = 4;
+        dir->file_type = 2;  // Directory
+        memcpy(dir->name, "home", 4);
+        
+        // "readme.txt" file entry
+        dir = (ext2_dir_entry_t*)((char*)dir + dir->rec_len);
+        dir->inode = 12;  // Arbitrary inode number
+        dir->rec_len = 20;
+        dir->name_len = 10;
+        dir->file_type = 1;  // Regular file
+        memcpy(dir->name, "readme.txt", 10);
+        
+        // Last entry to fill the rest of the block
+        dir = (ext2_dir_entry_t*)((char*)dir + dir->rec_len);
+        dir->inode = 0;  // No more entries
+        dir->rec_len = 1024 - 12 - 12 - 16 - 20;
+        
+        // Create "home" directory inode
+        ext2_inode_t* home_inode = (ext2_inode_t*)(fs_image + 5 * 1024 + 11 * sizeof(ext2_inode_t));
+        home_inode->mode = EXT2_S_IFDIR | 0755;
+        home_inode->size = 1024;
+        home_inode->blocks = 2;
+        home_inode->block[0] = 21;  // Data block for home directory
+        
+        // Create home directory entries
+        dir = (ext2_dir_entry_t*)(fs_image + 21 * 1024);
+        
+        // "." entry
+        dir->inode = 11;  // Home inode
+        dir->rec_len = 12;
+        dir->name_len = 1;
+        dir->file_type = 2;  // Directory
+        dir->name[0] = '.';
+        
+        // ".." entry
+        dir = (ext2_dir_entry_t*)((char*)dir + dir->rec_len);
+        dir->inode = 2;  // Parent is root
+        dir->rec_len = 12;
+        dir->name_len = 2;
+        dir->file_type = 2;  // Directory
+        dir->name[0] = '.';
+        dir->name[1] = '.';
+        
+        // "user.txt" file entry
+        dir = (ext2_dir_entry_t*)((char*)dir + dir->rec_len);
+        dir->inode = 13;  // Arbitrary inode number
+        dir->rec_len = 20;
+        dir->name_len = 8;
+        dir->file_type = 1;  // Regular file
+        memcpy(dir->name, "user.txt", 8);
+        
+        // Last entry
+        dir = (ext2_dir_entry_t*)((char*)dir + dir->rec_len);
+        dir->inode = 0;
+        dir->rec_len = 1024 - 12 - 12 - 20;
+        
+        // Create "readme.txt" file inode
+        ext2_inode_t* readme_inode = (ext2_inode_t*)(fs_image + 5 * 1024 + 12 * sizeof(ext2_inode_t));
+        readme_inode->mode = EXT2_S_IFREG | 0644;
+        readme_inode->size = 37;  // File size
+        readme_inode->blocks = 2;
+        readme_inode->block[0] = 22;  // Data block for readme.txt
+        
+        // Create readme.txt file content
+        char* readme_content = "Welcome to the uintOS ext2 filesystem!";
+        memcpy(fs_image + 22 * 1024, readme_content, strlen(readme_content));
+        
+        // Create "user.txt" file inode
+        ext2_inode_t* user_inode = (ext2_inode_t*)(fs_image + 5 * 1024 + 13 * sizeof(ext2_inode_t));
+        user_inode->mode = EXT2_S_IFREG | 0644;
+        user_inode->size = 21;  // File size
+        user_inode->blocks = 2;
+        user_inode->block[0] = 23;  // Data block for user.txt
+        
+        // Create user.txt file content
+        char* user_content = "User directory file.";
+        memcpy(fs_image + 23 * 1024, user_content, strlen(user_content));
+    }
+    
+    // Read the requested block from our simulated filesystem
+    if (block_num * block_size >= sizeof(fs_image)) {
+        return EXT2_ERR_IO_ERROR;  // Out of bounds
+    }
+    
+    memcpy(buffer, fs_image + block_num * block_size, block_size);
     return 0;
 }
 
 // Write a block to the filesystem
 static int write_block(uint32_t block_num, const void* buffer) {
-    // This would use disk I/O functions to write the block
-    // For simplicity, we'll just return success
+    // In a real implementation, this would write to a block device
+    // For our simulation, we'll just return success
     return 0;
 }
 

@@ -457,6 +457,8 @@ void shell_execute_command(const char *command) {
             cmd_vfs(argc, argv);
         } else if (strcmp(argv[0], "wdm") == 0) {
             cmd_wdm(argc, argv);  // New Windows driver command
+        } else if (strcmp(argv[0], "usb") == 0) {
+            cmd_usb(argc, argv);  // New USB command
         } else {
             log_warning("SHELL", "Unknown command: %s", argv[0]);
             shell_println("Unknown command. Type 'help' for a list of commands.");
@@ -490,6 +492,7 @@ void cmd_help(int argc, char *argv[]) {
     shell_println("  log      - View and manage system logs");
     shell_println("  vfs      - Virtual filesystem operations");
     shell_println("  wdm      - Windows driver management");
+    shell_println("  usb      - USB subsystem management");
 }
 
 void cmd_clear(int argc, char *argv[]) {
@@ -1540,5 +1543,368 @@ void cmd_wdm(int argc, char *argv[]) {
     }
     else {
         shell_println("Unknown wdm command. Type 'wdm' for a list of commands.");
+    }
+}
+
+// USB command implementation
+void cmd_usb(int argc, char *argv[]) {
+    // Include necessary headers
+    #include "../drivers/usb/usb_mass_storage.h"
+    #include "../hal/include/hal_usb.h"
+    
+    if (argc == 1) {
+        // Display usage information if no arguments
+        shell_println("USB Subsystem Commands:");
+        shell_println("  usb init       - Initialize USB subsystem");
+        shell_println("  usb scan       - Scan for USB devices");
+        shell_println("  usb list       - List connected USB devices");
+        shell_println("  usb info <id>  - Show detailed information about a USB device");
+        shell_println("  usb mount <id> <path> - Mount a USB storage device");
+        shell_println("  usb umount <id>       - Unmount a USB storage device");
+        shell_println("  usb reset <id>        - Reset a USB device");
+        shell_println("  usb shutdown          - Shut down USB subsystem");
+        shell_println("");
+        shell_println("Examples:");
+        shell_println("  usb init              - Initialize the USB subsystem");
+        shell_println("  usb mount 1 /mnt/usb  - Mount USB device 1 at /mnt/usb");
+        return;
+    }
+    
+    // Handle various USB subcommands
+    if (strcmp(argv[1], "init") == 0) {
+        shell_println("Initializing USB subsystem...");
+        
+        // First initialize the HAL USB
+        int result = hal_usb_init();
+        if (result < 0) {
+            shell_println("Failed to initialize USB HAL!");
+            return;
+        }
+        
+        // Then initialize the Mass Storage driver
+        result = usb_mass_storage_init();
+        if (result < 0) {
+            shell_println("Failed to initialize USB Mass Storage driver!");
+            return;
+        }
+        
+        shell_println("USB subsystem initialized successfully.");
+    }
+    else if (strcmp(argv[1], "scan") == 0) {
+        shell_println("Scanning for USB devices...");
+        
+        // Detect USB Mass Storage devices
+        int count = usb_mass_storage_detect_devices();
+        
+        if (count < 0) {
+            shell_println("Error scanning for USB devices!");
+            return;
+        }
+        
+        char buffer[16];
+        int_to_string(count, buffer);
+        shell_print("Found ");
+        shell_print(buffer);
+        shell_println(" USB Mass Storage devices.");
+    }
+    else if (strcmp(argv[1], "list") == 0) {
+        // Get list of USB Mass Storage devices
+        usb_mass_storage_device_t devices[8];
+        int count = usb_mass_storage_get_devices(devices, 8);
+        
+        if (count < 0) {
+            shell_println("Error getting USB device list!");
+            return;
+        }
+        
+        if (count == 0) {
+            shell_println("No USB storage devices connected.");
+            shell_println("Try 'usb scan' to scan for devices.");
+            return;
+        }
+        
+        // Display header for device list
+        shell_println("ID  Vendor      Product                  Size        Mounted");
+        shell_println("--  ----------  -----------------------  ----------  -------");
+        
+        // Display each device
+        char buffer[32];
+        for (int i = 0; i < count; i++) {
+            // Device ID
+            int_to_string(devices[i].device_addr, buffer);
+            shell_print(buffer);
+            shell_print("  ");
+            
+            // Add padding for ID
+            int padding = 2 - strlen(buffer);
+            while (padding-- > 0) {
+                shell_print(" ");
+            }
+            
+            // Vendor
+            shell_print(devices[i].vendor);
+            padding = 12 - strlen(devices[i].vendor);
+            while (padding-- > 0) {
+                shell_print(" ");
+            }
+            
+            // Product
+            shell_print(devices[i].product);
+            padding = 25 - strlen(devices[i].product);
+            while (padding-- > 0) {
+                shell_print(" ");
+            }
+            
+            // Size (blocks * block size)
+            uint64_t size_kb = ((uint64_t)devices[i].num_blocks * devices[i].block_size) / 1024;
+            if (size_kb >= 1024 * 1024) {
+                // Display in GB
+                uint64_t size_gb = size_kb / (1024 * 1024);
+                int_to_string(size_gb, buffer);
+                shell_print(buffer);
+                shell_print(" GB    ");
+            } else if (size_kb >= 1024) {
+                // Display in MB
+                uint64_t size_mb = size_kb / 1024;
+                int_to_string(size_mb, buffer);
+                shell_print(buffer);
+                shell_print(" MB    ");
+            } else {
+                // Display in KB
+                int_to_string(size_kb, buffer);
+                shell_print(buffer);
+                shell_print(" KB    ");
+            }
+            
+            // Mounted status
+            if (devices[i].mounted) {
+                shell_println("Yes");
+            } else {
+                shell_println("No");
+            }
+        }
+    }
+    else if (strcmp(argv[1], "info") == 0) {
+        // Display detailed information about a device
+        if (argc < 3) {
+            shell_println("Usage: usb info <device_id>");
+            return;
+        }
+        
+        // Parse device ID
+        int device_id = 0;
+        for (int i = 0; argv[2][i]; i++) {
+            if (argv[2][i] >= '0' && argv[2][i] <= '9') {
+                device_id = device_id * 10 + (argv[2][i] - '0');
+            } else {
+                shell_println("Invalid device ID!");
+                return;
+            }
+        }
+        
+        // Get device info
+        usb_mass_storage_device_t devices[8];
+        int count = usb_mass_storage_get_devices(devices, 8);
+        int found = 0;
+        
+        for (int i = 0; i < count; i++) {
+            if (devices[i].device_addr == device_id) {
+                // Display detailed information
+                shell_println("USB Device Information:");
+                
+                shell_print("  Address:     ");
+                char buffer[16];
+                int_to_string(devices[i].device_addr, buffer);
+                shell_println(buffer);
+                
+                shell_print("  Vendor:      ");
+                shell_println(devices[i].vendor);
+                
+                shell_print("  Product:     ");
+                shell_println(devices[i].product);
+                
+                shell_print("  Revision:    ");
+                shell_println(devices[i].revision);
+                
+                shell_print("  Block Size:  ");
+                int_to_string(devices[i].block_size, buffer);
+                shell_print(buffer);
+                shell_println(" bytes");
+                
+                shell_print("  Num Blocks:  ");
+                int_to_string(devices[i].num_blocks, buffer);
+                shell_println(buffer);
+                
+                shell_print("  Total Size:  ");
+                uint64_t size_kb = ((uint64_t)devices[i].num_blocks * devices[i].block_size) / 1024;
+                if (size_kb >= 1024 * 1024) {
+                    // Display in GB
+                    uint64_t size_gb = size_kb / (1024 * 1024);
+                    int_to_string(size_gb, buffer);
+                    shell_print(buffer);
+                    shell_println(" GB");
+                } else if (size_kb >= 1024) {
+                    // Display in MB
+                    uint64_t size_mb = size_kb / 1024;
+                    int_to_string(size_mb, buffer);
+                    shell_print(buffer);
+                    shell_println(" MB");
+                } else {
+                    // Display in KB
+                    int_to_string(size_kb, buffer);
+                    shell_print(buffer);
+                    shell_println(" KB");
+                }
+                
+                shell_print("  Interface:   ");
+                int_to_string(devices[i].interface_num, buffer);
+                shell_println(buffer);
+                
+                shell_print("  Max LUN:     ");
+                int_to_string(devices[i].max_lun, buffer);
+                shell_println(buffer);
+                
+                shell_print("  Status:      ");
+                shell_println(devices[i].mounted ? "Mounted" : "Not mounted");
+                
+                // Test if the device is ready
+                int ready = usb_mass_storage_test_unit_ready(device_id, 0);
+                shell_print("  Ready:       ");
+                if (ready > 0) {
+                    shell_println("Yes");
+                } else if (ready == 0) {
+                    shell_println("No");
+                } else {
+                    shell_println("Error");
+                }
+                
+                found = 1;
+                break;
+            }
+        }
+        
+        if (!found) {
+            shell_println("Device not found! Use 'usb list' to see available devices.");
+        }
+    }
+    else if (strcmp(argv[1], "mount") == 0) {
+        // Mount a USB storage device
+        if (argc < 4) {
+            shell_println("Usage: usb mount <device_id> <mount_point>");
+            return;
+        }
+        
+        // Parse device ID
+        int device_id = 0;
+        for (int i = 0; argv[2][i]; i++) {
+            if (argv[2][i] >= '0' && argv[2][i] <= '9') {
+                device_id = device_id * 10 + (argv[2][i] - '0');
+            } else {
+                shell_println("Invalid device ID!");
+                return;
+            }
+        }
+        
+        const char* mount_point = argv[3];
+        
+        // Mount the device
+        shell_print("Mounting USB device ");
+        char buffer[16];
+        int_to_string(device_id, buffer);
+        shell_print(buffer);
+        shell_print(" on ");
+        shell_print(mount_point);
+        shell_println("...");
+        
+        int result = usb_mass_storage_mount(device_id, mount_point);
+        if (result == 0) {
+            shell_println("Device mounted successfully.");
+        } else {
+            shell_println("Failed to mount device!");
+        }
+    }
+    else if (strcmp(argv[1], "umount") == 0 || strcmp(argv[1], "unmount") == 0) {
+        // Unmount a USB storage device
+        if (argc < 3) {
+            shell_println("Usage: usb umount <device_id>");
+            return;
+        }
+        
+        // Parse device ID
+        int device_id = 0;
+        for (int i = 0; argv[2][i]; i++) {
+            if (argv[2][i] >= '0' && argv[2][i] <= '9') {
+                device_id = device_id * 10 + (argv[2][i] - '0');
+            } else {
+                shell_println("Invalid device ID!");
+                return;
+            }
+        }
+        
+        // Unmount the device
+        shell_print("Unmounting USB device ");
+        char buffer[16];
+        int_to_string(device_id, buffer);
+        shell_print(buffer);
+        shell_println("...");
+        
+        int result = usb_mass_storage_unmount(device_id);
+        if (result == 0) {
+            shell_println("Device unmounted successfully.");
+        } else {
+            shell_println("Failed to unmount device!");
+        }
+    }
+    else if (strcmp(argv[1], "reset") == 0) {
+        // Reset a USB device port
+        if (argc < 3) {
+            shell_println("Usage: usb reset <device_id>");
+            return;
+        }
+        
+        // Parse device ID
+        int device_id = 0;
+        for (int i = 0; argv[2][i]; i++) {
+            if (argv[2][i] >= '0' && argv[2][i] <= '9') {
+                device_id = device_id * 10 + (argv[2][i] - '0');
+            } else {
+                shell_println("Invalid device ID!");
+                return;
+            }
+        }
+        
+        // Reset the device port
+        // For simplicity we'll assume controller 0, port = device_id
+        shell_print("Resetting USB device ");
+        char buffer[16];
+        int_to_string(device_id, buffer);
+        shell_print(buffer);
+        shell_println("...");
+        
+        int result = hal_usb_reset_port(0, device_id);
+        if (result == 0) {
+            shell_println("Device reset successfully.");
+            
+            // After reset, we need to re-scan for devices
+            shell_println("Rescanning for USB devices...");
+            usb_mass_storage_detect_devices();
+        } else {
+            shell_println("Failed to reset device!");
+        }
+    }
+    else if (strcmp(argv[1], "shutdown") == 0) {
+        // Shut down the USB subsystem
+        shell_println("Shutting down USB subsystem...");
+        
+        // First shut down the Mass Storage driver
+        usb_mass_storage_shutdown();
+        
+        // Then shut down the HAL USB
+        hal_usb_shutdown();
+        
+        shell_println("USB subsystem shut down.");
+    }
+    else {
+        shell_println("Unknown USB command. Try 'usb' for help.");
     }
 }

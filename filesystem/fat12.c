@@ -41,6 +41,119 @@ struct fat12_dir_entry {
 
 static struct fat12_boot_sector boot_sector;
 
+// Function to read a sector from disk
+int read_sector(uint32_t sector, void* buffer) {
+    // This would normally use a disk driver to read from an actual disk
+    // For a simple implementation, we'll create a basic in-memory disk image
+    
+    static int initialized = 0;
+    static uint8_t disk_image[1024 * 1024];  // 1MB disk image
+    
+    // Initialize disk image with a basic FAT12 structure on first use
+    if (!initialized) {
+        initialized = 1;
+        
+        // Create boot sector
+        struct fat12_boot_sector* bs = (struct fat12_boot_sector*)&disk_image[0];
+        bs->jump[0] = 0xEB;          // JMP instruction
+        bs->jump[1] = 0x3C;
+        bs->jump[2] = 0x90;
+        memcpy(bs->oem, "UINTOS  ", 8);
+        bs->bytes_per_sector = 512;
+        bs->sectors_per_cluster = 1;
+        bs->reserved_sectors = 1;
+        bs->num_fats = 2;
+        bs->root_dir_entries = 224;
+        bs->total_sectors = 2880;    // 1.44MB floppy
+        bs->media_descriptor = 0xF0; // 3.5" floppy
+        bs->sectors_per_fat = 9;
+        bs->sectors_per_track = 18;
+        bs->num_heads = 2;
+        bs->hidden_sectors = 0;
+        bs->large_sector_count = 0;
+        
+        // Calculate some key offsets
+        uint16_t fat_start = bs->reserved_sectors;
+        uint16_t root_dir_start = fat_start + bs->num_fats * bs->sectors_per_fat;
+        uint16_t data_start = root_dir_start + ((bs->root_dir_entries * 32) + (bs->bytes_per_sector - 1)) / bs->bytes_per_sector;
+        
+        // Initialize the first FAT
+        disk_image[fat_start * 512] = bs->media_descriptor;
+        disk_image[fat_start * 512 + 1] = 0xFF;
+        disk_image[fat_start * 512 + 2] = 0xFF;
+        
+        // Initialize the second FAT (identical to the first)
+        memcpy(&disk_image[(fat_start + bs->sectors_per_fat) * 512], 
+               &disk_image[fat_start * 512], 
+               bs->sectors_per_fat * 512);
+        
+        // Create some sample files in the root directory
+        struct fat12_dir_entry* dir = (struct fat12_dir_entry*)&disk_image[root_dir_start * 512];
+        
+        // File 1: README.TXT
+        memcpy(dir->name, "README  TXT", 11);
+        dir->attr = 0x20;  // Archive attribute
+        dir->first_cluster_low = 2;
+        dir->file_size = 37;
+        dir->create_date = 0x5345;  // Some date value
+        dir->create_time = 0x6123;  // Some time value
+        dir->write_date = 0x5345;
+        dir->write_time = 0x6123;
+        
+        // Content for README.TXT
+        char* readme_content = "uintOS - A simple educational OS\r\n";
+        memcpy(&disk_image[data_start * 512], readme_content, strlen(readme_content));
+        
+        // File 2: KERNEL.BIN
+        dir++;
+        memcpy(dir->name, "KERNEL  BIN", 11);
+        dir->attr = 0x20;  // Archive attribute
+        dir->first_cluster_low = 3;
+        dir->file_size = 512;  // 512 byte kernel
+        dir->create_date = 0x5345;  // Some date value
+        dir->create_time = 0x6123;  // Some time value
+        dir->write_date = 0x5345;
+        dir->write_time = 0x6123;
+        
+        // Simple content for KERNEL.BIN
+        memset(&disk_image[(data_start + 1) * 512], 0xAA, 512);
+        
+        // Directory: SYSTEM
+        dir++;
+        memcpy(dir->name, "SYSTEM     ", 11);
+        dir->attr = 0x10;  // Directory attribute
+        dir->first_cluster_low = 4;
+        dir->file_size = 0;  // Directories have size 0
+        dir->create_date = 0x5345;
+        dir->create_time = 0x6123;
+        dir->write_date = 0x5345;
+        dir->write_time = 0x6123;
+        
+        // File 3: LOG.TXT
+        dir++;
+        memcpy(dir->name, "LOG     TXT", 11);
+        dir->attr = 0x20;  // Archive attribute
+        dir->first_cluster_low = 5;
+        dir->file_size = 24;
+        dir->create_date = 0x5345;
+        dir->create_time = 0x6123;
+        dir->write_date = 0x5345;
+        dir->write_time = 0x6123;
+        
+        // Content for LOG.TXT
+        char* log_content = "System started up OK\r\n";
+        memcpy(&disk_image[(data_start + 3) * 512], log_content, strlen(log_content));
+    }
+    
+    // Read the requested sector from our in-memory disk image
+    if (sector * 512 >= sizeof(disk_image)) {
+        return 0;  // Out of bounds
+    }
+    
+    memcpy(buffer, &disk_image[sector * 512], 512);
+    return 512;  // Return number of bytes read
+}
+
 void fat12_init() {
     // Read the boot sector from the disk
     read_sector(0, (uint8_t*)&boot_sector);
