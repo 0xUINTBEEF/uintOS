@@ -439,6 +439,8 @@ void shell_execute_command(const char *command) {
             cmd_meminfo(argc, argv);
         } else if (strcmp(argv[0], "taskinfo") == 0) {
             cmd_taskinfo(argc, argv);
+        } else if (strcmp(argv[0], "taskman") == 0) {
+            cmd_taskman(argc, argv);
         } else if (strcmp(argv[0], "reboot") == 0) {
             cmd_reboot(argc, argv);
         } else if (strcmp(argv[0], "memstat") == 0) {
@@ -487,6 +489,7 @@ void cmd_help(int argc, char *argv[]) {
     shell_println("  memstat  - Display detailed memory statistics");
     shell_println("  memtest  - Run memory allocation tests");
     shell_println("  taskinfo - Display task information");
+    shell_println("  taskman  - Launch interactive task manager");
     shell_println("  reboot   - Reboot the system");
     shell_println("  vgademo  - Run VGA demonstration");
     shell_println("  log      - View and manage system logs");
@@ -1907,4 +1910,325 @@ void cmd_usb(int argc, char *argv[]) {
     else {
         shell_println("Unknown USB command. Try 'usb' for help.");
     }
+}
+
+// Process Manager UI command implementation
+void cmd_taskman(int argc, char *argv[]) {
+    #include "task.h"
+    #include "io.h"
+    #include "keyboard.h"
+    
+    // Process Manager UI constants
+    #define TASKMAN_REFRESH_DELAY 500000 // Microseconds between screen refreshes
+    #define TASKMAN_HEADER_COLOR vga_entry_color(VGA_COLOR_BLACK, VGA_COLOR_LIGHT_GREY)
+    #define TASKMAN_SELECTED_COLOR vga_entry_color(VGA_COLOR_WHITE, VGA_COLOR_BLUE)
+    #define TASKMAN_NORMAL_COLOR vga_entry_color(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK)
+    #define TASKMAN_RUNNING_COLOR vga_entry_color(VGA_COLOR_GREEN, VGA_COLOR_BLACK)
+    #define TASKMAN_SYSTEM_COLOR vga_entry_color(VGA_COLOR_CYAN, VGA_COLOR_BLACK)
+    #define TASKMAN_WARNING_COLOR vga_entry_color(VGA_COLOR_YELLOW, VGA_COLOR_BLACK)
+    #define TASKMAN_ERROR_COLOR vga_entry_color(VGA_COLOR_RED, VGA_COLOR_BLACK)
+    
+    // Static data for task manager state
+    static int selected_task = 0;
+    static int task_view_scroll = 0;
+    static const int tasks_per_page = 15;
+    static const char* help_text[] = {
+        "UP/DOWN - Select task",
+        "S - Suspend selected task",
+        "R - Resume selected task",
+        "T - Terminate selected task",
+        "P - Priority (higher/lower)",
+        "F5 - Refresh view",
+        "ESC - Exit to shell",
+        NULL
+    };
+    
+    // Keep track of the last seen task count to detect changes
+    static int last_task_count = 0;
+    
+    // Save original VGA state
+    uint8_t original_color = vga_current_color;
+    
+    log_debug("SHELL", "Starting Task Manager UI");
+    vga_clear_screen();
+    
+    // Run the Task Manager UI until user exits
+    int running = 1;
+    int refresh_needed = 1;
+    
+    while (running) {
+        // Only redraw the screen if something changed
+        if (refresh_needed) {
+            // Get current task information
+            int task_count = get_task_count();
+            int current_task_id = get_current_task_id();
+            
+            // Auto-adjust selection if tasks have been added/removed
+            if (task_count != last_task_count) {
+                if (selected_task >= task_count) {
+                    selected_task = task_count > 0 ? task_count - 1 : 0;
+                }
+                last_task_count = task_count;
+            }
+            
+            // Adjust scroll position if needed
+            if (selected_task < task_view_scroll) {
+                task_view_scroll = selected_task;
+            } else if (selected_task >= task_view_scroll + tasks_per_page) {
+                task_view_scroll = selected_task - tasks_per_page + 1;
+            }
+            
+            // Clear the screen
+            vga_clear_screen();
+            
+            // Draw title bar
+            vga_set_color(TASKMAN_HEADER_COLOR);
+            for (int i = 0; i < VGA_WIDTH; i++) {
+                vga_write_char_at(' ', i, 0);
+            }
+            vga_write_string_at("uintOS Task Manager", 30, 0);
+            
+            // Draw column headers
+            vga_set_color(TASKMAN_HEADER_COLOR);
+            vga_write_string_at("ID", 1, 1);
+            vga_write_string_at("Name", 6, 1);
+            vga_write_string_at("State", 30, 1);
+            vga_write_string_at("Priv", 40, 1);
+            vga_write_string_at("Flags", 50, 1);
+            vga_write_string_at("Stack", 60, 1);
+            vga_write_string_at("Parent", 70, 1);
+            
+            // Draw separator line
+            vga_set_color(TASKMAN_NORMAL_COLOR);
+            for (int i = 0; i < VGA_WIDTH; i++) {
+                vga_write_char_at('-', i, 2);
+            }
+            
+            // Display task information
+            int displayed_tasks = 0;
+            for (int i = task_view_scroll; i < task_count && displayed_tasks < tasks_per_page; i++) {
+                task_info_t info;
+                if (get_task_info(i, &info)) {
+                    // Determine row color
+                    if (i == selected_task) {
+                        vga_set_color(TASKMAN_SELECTED_COLOR);
+                    } else if (info.is_current) {
+                        vga_set_color(TASKMAN_RUNNING_COLOR);
+                    } else if (info.flags & TASK_FLAG_SYSTEM) {
+                        vga_set_color(TASKMAN_SYSTEM_COLOR);
+                    } else {
+                        vga_set_color(TASKMAN_NORMAL_COLOR);
+                    }
+                    
+                    int row = 3 + displayed_tasks;
+                    
+                    // ID column
+                    char id_str[8];
+                    int_to_string(info.id, id_str);
+                    vga_write_string_at(id_str, 1, row);
+                    
+                    // Name column
+                    vga_write_string_at(info.name, 6, row);
+                    
+                    // State column
+                    const char* state_str = "Unknown";
+                    switch (info.state) {
+                        case TASK_STATE_UNUSED:    state_str = "Unused"; break;
+                        case TASK_STATE_READY:     state_str = "Ready"; break;
+                        case TASK_STATE_RUNNING:   state_str = "Running"; break;
+                        case TASK_STATE_BLOCKED:   state_str = "Blocked"; break;
+                        case TASK_STATE_SUSPENDED: state_str = "Suspended"; break;
+                        case TASK_STATE_ZOMBIE:    state_str = "Zombie"; break;
+                    }
+                    vga_write_string_at(state_str, 30, row);
+                    
+                    // Privilege level column
+                    const char* priv_str = "?";
+                    switch (info.privilege_level) {
+                        case TASK_PRIV_KERNEL:  priv_str = "Kernel"; break;
+                        case TASK_PRIV_DRIVER:  priv_str = "Driver"; break;
+                        case TASK_PRIV_SYSTEM:  priv_str = "System"; break;
+                        case TASK_PRIV_USER:    priv_str = "User"; break;
+                    }
+                    vga_write_string_at(priv_str, 40, row);
+                    
+                    // Flags column
+                    char flags[8] = "-----";
+                    if (info.flags & TASK_FLAG_SYSTEM)   flags[0] = 'S';
+                    if (info.flags & TASK_FLAG_USER)     flags[1] = 'U';
+                    if (info.flags & TASK_FLAG_KERNEL)   flags[2] = 'K';
+                    if (info.flags & TASK_FLAG_DRIVER)   flags[3] = 'D';
+                    if (info.flags & TASK_FLAG_SERVICE)  flags[4] = 'V';
+                    vga_write_string_at(flags, 50, row);
+                    
+                    // Stack size column
+                    char stack_str[12];
+                    int_to_string(info.stack_size, stack_str);
+                    vga_write_string_at(stack_str, 60, row);
+                    
+                    // Parent ID column
+                    if (info.parent_id >= 0) {
+                        char parent_str[8];
+                        int_to_string(info.parent_id, parent_str);
+                        vga_write_string_at(parent_str, 70, row);
+                    } else {
+                        vga_write_string_at("-", 70, row);
+                    }
+                    
+                    displayed_tasks++;
+                }
+            }
+            
+            // Draw status bar
+            vga_set_color(TASKMAN_HEADER_COLOR);
+            for (int i = 0; i < VGA_WIDTH; i++) {
+                vga_write_char_at(' ', i, 20);
+            }
+            
+            char status[64];
+            int_to_string(task_count, status);
+            strcat(status, " Tasks | Active: ");
+            char active[8];
+            int_to_string(current_task_id, active);
+            strcat(status, active);
+            vga_write_string_at(status, 1, 20);
+            
+            // Draw footer with help
+            vga_set_color(TASKMAN_HEADER_COLOR);
+            for (int i = 0; i < VGA_WIDTH; i++) {
+                vga_write_char_at(' ', i, 22);
+                vga_write_char_at(' ', i, 23);
+            }
+            
+            for (int i = 0; help_text[i] != NULL; i++) {
+                int x = i * 20;
+                if (x < VGA_WIDTH) {
+                    vga_write_string_at(help_text[i], x, 22);
+                } else {
+                    vga_write_string_at(help_text[i], x - VGA_WIDTH, 23);
+                }
+            }
+            
+            // Draw selected task details
+            if (task_count > 0 && selected_task >= 0 && selected_task < task_count) {
+                task_info_t info;
+                if (get_task_info(selected_task, &info)) {
+                    vga_set_color(TASKMAN_NORMAL_COLOR);
+                    vga_write_string_at("Selected Task Details:", 1, 19);
+                    
+                    // Draw a box around details
+                    vga_draw_box(0, 18, 79, 20, TASKMAN_NORMAL_COLOR);
+                    
+                    // Security SID information
+                    char sid_str[128] = "SID: ";
+                    if (info.user_sid.authority_value > 0) {
+                        char auth[16];
+                        int_to_string(info.user_sid.authority_value, auth);
+                        strcat(sid_str, "S-1-");
+                        strcat(sid_str, auth);
+                        
+                        for (int i = 0; i < info.user_sid.sub_authority_count; i++) {
+                            strcat(sid_str, "-");
+                            char sub_auth[16];
+                            int_to_string(info.user_sid.sub_authorities[i], sub_auth);
+                            strcat(sid_str, sub_auth);
+                        }
+                    } else {
+                        strcat(sid_str, "None");
+                    }
+                    
+                    vga_write_string_at(sid_str, 30, 19);
+                }
+            }
+            
+            // Reset the refresh flag
+            refresh_needed = 0;
+        }
+        
+        // Check for keyboard input
+        if (is_key_available()) {
+            char key = keyboard_read_key();
+            
+            switch (key) {
+                case KEY_UP_ARROW:
+                    if (selected_task > 0) {
+                        selected_task--;
+                        refresh_needed = 1;
+                    }
+                    break;
+                    
+                case KEY_DOWN_ARROW:
+                    if (selected_task < get_task_count() - 1) {
+                        selected_task++;
+                        refresh_needed = 1;
+                    }
+                    break;
+                    
+                case 's':   // Suspend task
+                case 'S':
+                    if (selected_task >= 0 && selected_task < get_task_count()) {
+                        int result = suspend_task(selected_task);
+                        refresh_needed = 1;
+                    }
+                    break;
+                    
+                case 'r':   // Resume task
+                case 'R':
+                    if (selected_task >= 0 && selected_task < get_task_count()) {
+                        int result = resume_task(selected_task);
+                        refresh_needed = 1;
+                    }
+                    break;
+                    
+                case 't':   // Terminate task
+                case 'T':
+                    if (selected_task >= 0 && selected_task < get_task_count()) {
+                        task_info_t info;
+                        if (get_task_info(selected_task, &info)) {
+                            // Don't allow terminating the idle task or the current task (ourselves)
+                            if (!info.is_current && strcmp(info.name, "System Idle") != 0) {
+                                int result = terminate_task(selected_task, 0);
+                                refresh_needed = 1;
+                            }
+                        }
+                    }
+                    break;
+                    
+                case 'p':   // Increase priority
+                case 'P':
+                    // Priority adjustment would go here if supported
+                    refresh_needed = 1;
+                    break;
+                    
+                case 0x3F:  // F5 key - refresh
+                    refresh_needed = 1;
+                    break;
+                    
+                case KEY_ESC:  // Exit
+                    running = 0;
+                    break;
+            }
+        }
+        
+        // Short delay to limit refresh rate and CPU usage
+        for (volatile int i = 0; i < TASKMAN_REFRESH_DELAY; i++) {
+            // Simple delay
+        }
+        
+        // Poll for changes in task count every few iterations
+        static int poll_counter = 0;
+        if (++poll_counter >= 5) {
+            poll_counter = 0;
+            int current_count = get_task_count();
+            if (current_count != last_task_count) {
+                refresh_needed = 1;
+            }
+        }
+    }
+    
+    // Restore original console state
+    vga_set_color(original_color);
+    vga_clear_screen();
+    
+    log_debug("SHELL", "Task Manager UI exited");
 }
