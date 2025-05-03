@@ -10,21 +10,14 @@
 #include "../logging/log.h"
 #include "../../memory/paging.h"
 #include "../../memory/heap.h"
+#include "../../hal/include/hal_cpu.h"
+#include "../../hal/include/hal_memory.h"
 #include "../io.h"
 #include "../asm.h"
 #include <string.h>
 
 // Define the VMX log tag
 #define VMX_LOG_TAG "VMX"
-
-// VMX MSR reading/writing assembly wrapper
-static inline void read_msr(uint32_t msr, uint32_t *low, uint32_t *high) {
-    asm volatile("rdmsr" : "=a"(*low), "=d"(*high) : "c"(msr));
-}
-
-static inline void write_msr(uint32_t msr, uint32_t low, uint32_t high) {
-    asm volatile("wrmsr" : : "a"(low), "d"(high), "c"(msr));
-}
 
 // Global array of VM instances
 static vm_instance_t vm_instances[MAX_VMS];
@@ -46,6 +39,30 @@ static uint8_t __attribute__((aligned(4096))) vmx_region[4096];
 #define VMX_ERROR_INSUFFICIENT_MEM  -8
 #define VMX_ERROR_INVALID_PARAM     -9
 
+/**
+ * VMX MSR Constants 
+ */
+#define IA32_VMX_BASIC              0x480
+#define IA32_VMX_CR0_FIXED0         0x486
+#define IA32_VMX_CR0_FIXED1         0x487
+#define IA32_VMX_CR4_FIXED0         0x488
+#define IA32_VMX_CR4_FIXED1         0x489
+#define IA32_FEATURE_CONTROL        0x3A
+
+/**
+ * Helper function to read 64-bit MSR using HAL
+ */
+static inline uint64_t read_msr_64(uint32_t msr) {
+    return hal_cpu_read_msr(msr);
+}
+
+/**
+ * Helper function to write 64-bit MSR using HAL
+ */
+static inline void write_msr_64(uint32_t msr, uint64_t value) {
+    hal_cpu_write_msr(msr, value);
+}
+
 // Initialize VMX and check for VMX support
 int vmx_init() {
     log_info(VMX_LOG_TAG, "Initializing VMX subsystem");
@@ -63,39 +80,32 @@ int vmx_init() {
     }
     
     // Set up the VMX region for VMXON
-    uint32_t vmx_basic_msr_low, vmx_basic_msr_high;
-    read_msr(IA32_VMX_BASIC, &vmx_basic_msr_low, &vmx_basic_msr_high);
+    uint64_t vmx_basic_msr = read_msr_64(IA32_VMX_BASIC);
     
     // The first 32 bits of the VMXON region must be set to the VMX revision identifier
-    uint32_t revision_id = vmx_basic_msr_low & 0x7FFFFFFF;
+    uint32_t revision_id = vmx_basic_msr & 0x7FFFFFFF;
     *(uint32_t *)vmx_region = revision_id;
     
     log_debug(VMX_LOG_TAG, "VMX revision ID: 0x%x", revision_id);
     
     // Get the fixed bits for CR0 and CR4
-    uint32_t cr0_fixed0_low, cr0_fixed0_high;
-    uint32_t cr0_fixed1_low, cr0_fixed1_high;
-    uint32_t cr4_fixed0_low, cr4_fixed0_high;
-    uint32_t cr4_fixed1_low, cr4_fixed1_high;
+    uint64_t cr0_fixed0 = read_msr_64(IA32_VMX_CR0_FIXED0);
+    uint64_t cr0_fixed1 = read_msr_64(IA32_VMX_CR0_FIXED1);
+    uint64_t cr4_fixed0 = read_msr_64(IA32_VMX_CR4_FIXED0);
+    uint64_t cr4_fixed1 = read_msr_64(IA32_VMX_CR4_FIXED1);
     
-    read_msr(IA32_VMX_CR0_FIXED0, &cr0_fixed0_low, &cr0_fixed0_high);
-    read_msr(IA32_VMX_CR0_FIXED1, &cr0_fixed1_low, &cr0_fixed1_high);
-    read_msr(IA32_VMX_CR4_FIXED0, &cr4_fixed0_low, &cr4_fixed0_high);
-    read_msr(IA32_VMX_CR4_FIXED1, &cr4_fixed1_low, &cr4_fixed1_high);
+    // Set the required bits in CR0 and CR4 using HAL functions
+    uint32_t cr0 = hal_cpu_read_cr0();
+    uint32_t cr4 = hal_cpu_read_cr4();
     
-    // Set the required bits in CR0 and CR4
-    uint32_t cr0, cr4;
-    asm volatile("mov %%cr0, %0" : "=r"(cr0));
-    asm volatile("mov %%cr4, %0" : "=r"(cr4));
-    
-    cr0 = (cr0 & cr0_fixed1_low) | cr0_fixed0_low;
-    cr4 = (cr4 & cr4_fixed1_low) | cr4_fixed0_low;
+    cr0 = (cr0 & cr0_fixed1) | cr0_fixed0;
+    cr4 = (cr4 & cr4_fixed1) | cr4_fixed0;
     
     // Set the VMX enable bit in CR4
     cr4 |= 0x2000; // CR4.VMXE bit
     
-    asm volatile("mov %0, %%cr0" : : "r"(cr0));
-    asm volatile("mov %0, %%cr4" : : "r"(cr4));
+    hal_cpu_write_cr0(cr0);
+    hal_cpu_write_cr4(cr4);
     
     // Enter VMX operation
     int result = vmx_enter_root_mode();
@@ -110,26 +120,20 @@ int vmx_init() {
 
 // Check if VMX is supported by the CPU
 int vmx_is_supported() {
-    // Check CPUID for VMX support
-    uint32_t eax, ebx, ecx, edx;
+    // Check for VMX support using HAL CPU info
+    hal_cpu_info_t cpu_info;
+    hal_cpu_get_info(&cpu_info);
     
-    // Execute CPUID with EAX=1 to check processor features
-    asm volatile("cpuid" 
-               : "=a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx) 
-               : "a"(1));
-    
-    // Check if bit 5 in ECX is set (indicates VMX support)
-    if (!(ecx & VMX_FEATURE_BIT)) {
+    if (!cpu_info.has_vmx) {
         log_warn(VMX_LOG_TAG, "CPU does not support VMX");
         return 0;
     }
     
     // Check if VMX is disabled in BIOS using MSR IA32_FEATURE_CONTROL
-    uint32_t feature_ctrl_low, feature_ctrl_high;
-    read_msr(0x3A, &feature_ctrl_low, &feature_ctrl_high);
+    uint64_t feature_ctrl = read_msr_64(IA32_FEATURE_CONTROL);
     
     // Bit 0 = lock bit, Bit 2 = VMX outside SMX
-    if (!(feature_ctrl_low & 0x5)) {
+    if (!(feature_ctrl & 0x5)) {
         log_warn(VMX_LOG_TAG, "VMX is disabled in BIOS/firmware");
         return 0;
     }
@@ -140,24 +144,12 @@ int vmx_is_supported() {
 
 // Enter VMX root operation
 int vmx_enter_root_mode() {
-    uint32_t flags, vmx_on_result;
+    // Get physical address of the VMX region
+    uintptr_t vmx_region_phys = (uintptr_t)vmx_region;
     
-    // Execute VMXON instruction
-    asm volatile(
-        "pushf\n\t"                  // Save EFLAGS
-        "push %%eax\n\t"             // Save EAX
-        "vmxon %1\n\t"               // Try to enter VMX operation
-        "pushf\n\t"                  // Save EFLAGS after VMXON
-        "pop %0\n\t"                 // Store EFLAGS in vmx_on_result
-        "pop %%eax\n\t"              // Restore EAX
-        "popf"                       // Restore original EFLAGS
-        : "=r"(vmx_on_result)
-        : "m"(vmx_region)
-        : "cc", "memory"
-    );
-    
-    // Check if VMX operation was successful by checking the CF flag
-    if (vmx_on_result & 0x1) {
+    // Use HAL CPU function instead of inline assembly for VMXON
+    int result = hal_cpu_vmx_on(vmx_region_phys);
+    if (result != 0) {
         log_error(VMX_LOG_TAG, "VMXON instruction failed");
         return -1;
     }
@@ -168,31 +160,32 @@ int vmx_enter_root_mode() {
 
 // Exit VMX operation
 int vmx_exit_root_mode() {
-    uint32_t vmx_off_result;
+    uint32_t vmx_off_success = 0;
     
-    // Execute VMXOFF instruction
+    // Use inline assembly for VMXOFF since it's a specialized instruction
+    // In the future, this could be moved to hal_cpu_vmx_off()
     asm volatile(
-        "pushf\n\t"                  // Save EFLAGS
-        "vmxoff\n\t"                 // Exit VMX operation
-        "pushf\n\t"                  // Save EFLAGS after VMXOFF
-        "pop %0\n\t"                 // Store EFLAGS in vmx_off_result
-        "popf"                       // Restore original EFLAGS
-        : "=r"(vmx_off_result)
+        "vmxoff\n\t"
+        "jnc 1f\n\t"      // Jump if carry flag is not set (success)
+        "mov $0, %0\n\t"   // Set success to 0 (failure)
+        "jmp 2f\n\t"
+        "1:\n\t"
+        "mov $1, %0\n\t"   // Set success to 1 (success)
+        "2:"
+        : "=r"(vmx_off_success)
         :
         : "cc", "memory"
     );
     
-    // Check if VMXOFF was successful
-    if (vmx_off_result & 0x1) {
+    if (!vmx_off_success) {
         log_error(VMX_LOG_TAG, "VMXOFF instruction failed");
         return -1;
     }
     
-    // Clear VMX enable bit in CR4
-    uint32_t cr4;
-    asm volatile("mov %%cr4, %0" : "=r"(cr4));
+    // Clear VMX enable bit in CR4 using HAL
+    uint32_t cr4 = hal_cpu_read_cr4();
     cr4 &= ~0x2000; // Clear CR4.VMXE
-    asm volatile("mov %0, %%cr4" : : "r"(cr4));
+    hal_cpu_write_cr4(cr4);
     
     log_debug(VMX_LOG_TAG, "Exited VMX operation successfully");
     return 0;
@@ -244,18 +237,27 @@ int vmx_create_vm(const char* name, uint32_t memory_size, uint32_t vcpu_count) {
     memcpy(vm->name, name, name_len);
     vm->name[name_len] = '\0';
     
-    // Allocate memory for VMCS
-    vm->vmcs = (vmcs_t *)allocate_pages(1);
-    if (!vm->vmcs) {
+    // Allocate memory for VMCS using HAL memory allocation
+    uintptr_t vmcs_phys = hal_physical_alloc(1); // 1 page = 4KB
+    if (!vmcs_phys) {
         log_error(VMX_LOG_TAG, "Failed to allocate memory for VMCS");
         memset(vm, 0, sizeof(vm_instance_t));
         return VMX_ERROR_INSUFFICIENT_MEM;
     }
     
+    // Map VMCS into virtual memory
+    hal_page_flags_t flags = {0};
+    flags.access = HAL_MEM_ACCESS_RW;
+    flags.cache = HAL_CACHE_WRITE_BACK;
+    
+    // For simplicity, use identity mapping for now
+    // In a real implementation, we would use proper virtual memory allocation
+    uintptr_t vmcs_virt = vmcs_phys;
+    
     // Initialize VMCS
-    uint32_t vmx_basic_msr_low, vmx_basic_msr_high;
-    read_msr(IA32_VMX_BASIC, &vmx_basic_msr_low, &vmx_basic_msr_high);
-    uint32_t revision_id = vmx_basic_msr_low & 0x7FFFFFFF;
+    vm->vmcs = (vmcs_t *)vmcs_virt;
+    uint64_t vmx_basic_msr = read_msr_64(IA32_VMX_BASIC);
+    uint32_t revision_id = vmx_basic_msr & 0x7FFFFFFF;
     vm->vmcs->revision_id = revision_id;
     vm->vmcs->abort_indicator = 0;
     
@@ -263,7 +265,7 @@ int vmx_create_vm(const char* name, uint32_t memory_size, uint32_t vcpu_count) {
     vm->guest_state = (vm_guest_state_t *)malloc(sizeof(vm_guest_state_t));
     if (!vm->guest_state) {
         log_error(VMX_LOG_TAG, "Failed to allocate memory for guest state");
-        free_pages(vm->vmcs, 1);
+        hal_physical_free(vmcs_phys, 1);
         memset(vm, 0, sizeof(vm_instance_t));
         return VMX_ERROR_INSUFFICIENT_MEM;
     }
@@ -274,42 +276,60 @@ int vmx_create_vm(const char* name, uint32_t memory_size, uint32_t vcpu_count) {
     if (vm->cr3 == 0) {
         log_error(VMX_LOG_TAG, "Failed to create address space for VM");
         free(vm->guest_state);
-        free_pages(vm->vmcs, 1);
+        hal_physical_free(vmcs_phys, 1);
         memset(vm, 0, sizeof(vm_instance_t));
         return VMX_ERROR_INSUFFICIENT_MEM;
     }
     
-    // Allocate memory for I/O bitmaps (4KB each)
-    vm->io_bitmap_a = allocate_pages(1);
-    vm->io_bitmap_b = allocate_pages(1);
-    if (!vm->io_bitmap_a || !vm->io_bitmap_b) {
-        log_error(VMX_LOG_TAG, "Failed to allocate memory for I/O bitmaps");
-        if (vm->io_bitmap_a) free_pages(vm->io_bitmap_a, 1);
-        if (vm->io_bitmap_b) free_pages(vm->io_bitmap_b, 1);
+    // Allocate memory for I/O bitmaps and MSR bitmap using HAL
+    vm->io_bitmap_a_phys = hal_physical_alloc(1);
+    vm->io_bitmap_b_phys = hal_physical_alloc(1);
+    vm->msr_bitmap_phys = hal_physical_alloc(1);
+    
+    if (!vm->io_bitmap_a_phys || !vm->io_bitmap_b_phys || !vm->msr_bitmap_phys) {
+        log_error(VMX_LOG_TAG, "Failed to allocate memory for bitmaps");
+        if (vm->io_bitmap_a_phys) hal_physical_free(vm->io_bitmap_a_phys, 1);
+        if (vm->io_bitmap_b_phys) hal_physical_free(vm->io_bitmap_b_phys, 1);
+        if (vm->msr_bitmap_phys) hal_physical_free(vm->msr_bitmap_phys, 1);
         free(vm->guest_state);
-        free_pages(vm->vmcs, 1);
+        hal_physical_free(vmcs_phys, 1);
         memset(vm, 0, sizeof(vm_instance_t));
         return VMX_ERROR_INSUFFICIENT_MEM;
     }
     
-    // Set all bits to 1 to intercept all I/O operations (can be refined later)
+    // Map bitmaps into virtual memory (identity mapping for now)
+    vm->io_bitmap_a = (void*)vm->io_bitmap_a_phys;
+    vm->io_bitmap_b = (void*)vm->io_bitmap_b_phys;
+    vm->msr_bitmap = (void*)vm->msr_bitmap_phys;
+    
+    // Set all bits to 1 to intercept all I/O operations and MSR accesses
     memset(vm->io_bitmap_a, 0xFF, 4096);
     memset(vm->io_bitmap_b, 0xFF, 4096);
-    
-    // Allocate memory for MSR bitmap (4KB)
-    vm->msr_bitmap = allocate_pages(1);
-    if (!vm->msr_bitmap) {
-        log_error(VMX_LOG_TAG, "Failed to allocate memory for MSR bitmap");
-        free_pages(vm->io_bitmap_a, 1);
-        free_pages(vm->io_bitmap_b, 1);
-        free(vm->guest_state);
-        free_pages(vm->vmcs, 1);
-        memset(vm, 0, sizeof(vm_instance_t));
-        return VMX_ERROR_INSUFFICIENT_MEM;
-    }
-    
-    // Set all bits to 1 to intercept all MSR accesses (can be refined later)
     memset(vm->msr_bitmap, 0xFF, 4096);
+    
+    // Initialize vCPU context using HAL CPU context functions
+    for (uint32_t i = 0; i < vcpu_count && i < MAX_VCPUS; i++) {
+        // Allocate vCPU context
+        vm->vcpu_contexts[i] = (hal_cpu_context_t*)malloc(sizeof(hal_cpu_context_t));
+        if (!vm->vcpu_contexts[i]) {
+            log_error(VMX_LOG_TAG, "Failed to allocate vCPU context %d", i);
+            // Free all previously allocated contexts
+            for (uint32_t j = 0; j < i; j++) {
+                free(vm->vcpu_contexts[j]);
+            }
+            // Free other resources
+            hal_physical_free(vm->io_bitmap_a_phys, 1);
+            hal_physical_free(vm->io_bitmap_b_phys, 1);
+            hal_physical_free(vm->msr_bitmap_phys, 1);
+            free(vm->guest_state);
+            hal_physical_free(vmcs_phys, 1);
+            memset(vm, 0, sizeof(vm_instance_t));
+            return VMX_ERROR_INSUFFICIENT_MEM;
+        }
+        
+        // Initialize vCPU context
+        memset(vm->vcpu_contexts[i], 0, sizeof(hal_cpu_context_t));
+    }
     
     // Increase VM count
     num_vms++;
@@ -348,11 +368,23 @@ int vmx_delete_vm(uint32_t vm_id) {
     log_info(VMX_LOG_TAG, "Deleting VM '%s' (ID: %d)", vm->name, vm_id);
     
     // Free all allocated resources
-    if (vm->msr_bitmap) free_pages(vm->msr_bitmap, 1);
-    if (vm->io_bitmap_a) free_pages(vm->io_bitmap_a, 1);
-    if (vm->io_bitmap_b) free_pages(vm->io_bitmap_b, 1);
+    if (vm->msr_bitmap_phys) hal_physical_free(vm->msr_bitmap_phys, 1);
+    if (vm->io_bitmap_a_phys) hal_physical_free(vm->io_bitmap_a_phys, 1);
+    if (vm->io_bitmap_b_phys) hal_physical_free(vm->io_bitmap_b_phys, 1);
     if (vm->guest_state) free(vm->guest_state);
-    if (vm->vmcs) free_pages(vm->vmcs, 1);
+    
+    // Free vCPU contexts
+    for (uint32_t i = 0; i < vm->vcpu_count && i < MAX_VCPUS; i++) {
+        if (vm->vcpu_contexts[i]) {
+            free(vm->vcpu_contexts[i]);
+        }
+    }
+    
+    // Free VMCS physical memory
+    if (vm->vmcs) {
+        // In this example we're using identity mapping, so physical = virtual
+        hal_physical_free((uintptr_t)vm->vmcs, 1);
+    }
     
     // Mark the VM as uninitialized
     memset(vm, 0, sizeof(vm_instance_t));
@@ -385,43 +417,93 @@ int vmx_setup_vmcs(uint32_t vm_id) {
     vm_guest_state_t* guest_state = vm->guest_state;
     
     // Execute VMCLEAR to initialize the VMCS
-    uint32_t vmclear_result;
-    asm volatile(
-        "pushf\n\t"
-        "vmclear %1\n\t"
-        "pushf\n\t"
-        "pop %0\n\t"
-        "popf"
-        : "=r"(vmclear_result)
-        : "m"(vmcs)
-        : "cc", "memory"
-    );
-    
-    if (vmclear_result & 0x1) {
-        log_error(VMX_LOG_TAG, "VMCLEAR failed");
+    int vmclear_result = vmx_vmclear((uintptr_t)vmcs);
+    if (vmclear_result != 0) {
         return VMX_ERROR_VMCS_SETUP;
     }
     
     // Execute VMPTRLD to make this the current VMCS
-    uint32_t vmptrld_result;
-    asm volatile(
-        "pushf\n\t"
-        "vmptrld %1\n\t"
-        "pushf\n\t"
-        "pop %0\n\t"
-        "popf"
-        : "=r"(vmptrld_result)
-        : "m"(vmcs)
-        : "cc", "memory"
-    );
-    
-    if (vmptrld_result & 0x1) {
-        log_error(VMX_LOG_TAG, "VMPTRLD failed");
+    int vmptrld_result = vmx_vmptrld((uintptr_t)vmcs);
+    if (vmptrld_result != 0) {
         return VMX_ERROR_VMCS_SETUP;
     }
     
-    // Set up control fields
-    // TODO: Implement proper VMCS setup with vmx_vmwrite
+    // Set up control fields for the VM
+    // These settings are simplified for demonstration
+    
+    // 1. VM Entry controls
+    vmx_vmwrite(VMX_ENTRY_CONTROLS, 0x00000C92); // IA32e mode guest, load IA32_EFER
+    
+    // 2. VM Exit controls
+    vmx_vmwrite(VMX_EXIT_CONTROLS, 0x00036DFF); // Host address space size, load IA32_EFER
+    
+    // 3. Pin-based VM execution controls
+    vmx_vmwrite(VMX_PIN_BASED_VM_EXEC_CONTROL, 0x00000001); // External interrupt exiting
+    
+    // 4. Primary processor-based VM execution controls
+    vmx_vmwrite(VMX_CPU_BASED_VM_EXEC_CONTROL, 0x0000003F); // HLT, INVLPG, CR3 read/write, etc.
+    
+    // 5. Secondary processor-based VM execution controls (if available)
+    vmx_vmwrite(VMX_SECONDARY_VM_EXEC_CONTROL, 0x00000000);
+    
+    // 6. Exception bitmap (which exceptions cause VM exits)
+    vmx_vmwrite(VMX_EXCEPTION_BITMAP, 0x00000000); // No exceptions cause VM exits
+    
+    // 7. Set up control registers
+    vmx_vmwrite(VMX_CR0_GUEST_HOST_MASK, 0x00000000); // No bits cause VM exits
+    vmx_vmwrite(VMX_CR4_GUEST_HOST_MASK, 0x00000000); // No bits cause VM exits
+    
+    // 8. Guest state
+    // CR0, CR3, CR4
+    vmx_vmwrite(VMX_GUEST_CR0, hal_cpu_read_cr0());
+    vmx_vmwrite(VMX_GUEST_CR3, vm->cr3);
+    vmx_vmwrite(VMX_GUEST_CR4, hal_cpu_read_cr4() & ~0x2000); // Without VMX bit
+    
+    // Segment selectors and bases
+    vmx_vmwrite(VMX_GUEST_CS_SELECTOR, 0x0008); // Code segment
+    vmx_vmwrite(VMX_GUEST_DS_SELECTOR, 0x0010); // Data segment
+    vmx_vmwrite(VMX_GUEST_ES_SELECTOR, 0x0010);
+    vmx_vmwrite(VMX_GUEST_FS_SELECTOR, 0x0010);
+    vmx_vmwrite(VMX_GUEST_GS_SELECTOR, 0x0010);
+    vmx_vmwrite(VMX_GUEST_SS_SELECTOR, 0x0010);
+    
+    // Segment limits and access rights
+    vmx_vmwrite(VMX_GUEST_CS_LIMIT, 0xFFFFFFFF);
+    vmx_vmwrite(VMX_GUEST_DS_LIMIT, 0xFFFFFFFF);
+    vmx_vmwrite(VMX_GUEST_ES_LIMIT, 0xFFFFFFFF);
+    vmx_vmwrite(VMX_GUEST_FS_LIMIT, 0xFFFFFFFF);
+    vmx_vmwrite(VMX_GUEST_GS_LIMIT, 0xFFFFFFFF);
+    vmx_vmwrite(VMX_GUEST_SS_LIMIT, 0xFFFFFFFF);
+    
+    // Guest RFLAGS
+    vmx_vmwrite(VMX_GUEST_RFLAGS, 0x00000002); // Reserved bit is set
+    
+    // Guest RIP (entry point)
+    vmx_vmwrite(VMX_GUEST_RIP, 0x00000000); // Start at address 0
+    
+    // Guest RSP (stack pointer)
+    vmx_vmwrite(VMX_GUEST_RSP, 0x00000000); // No stack yet
+    
+    // Set up host state (state to return to on VM exit)
+    
+    // Host CR0, CR3, CR4
+    vmx_vmwrite(VMX_HOST_CR0, hal_cpu_read_cr0());
+    vmx_vmwrite(VMX_HOST_CR3, hal_cpu_read_cr3());
+    vmx_vmwrite(VMX_HOST_CR4, hal_cpu_read_cr4());
+    
+    // Host segment selectors
+    vmx_vmwrite(VMX_HOST_CS_SELECTOR, 0x0008);
+    vmx_vmwrite(VMX_HOST_DS_SELECTOR, 0x0010);
+    vmx_vmwrite(VMX_HOST_ES_SELECTOR, 0x0010);
+    vmx_vmwrite(VMX_HOST_FS_SELECTOR, 0x0010);
+    vmx_vmwrite(VMX_HOST_GS_SELECTOR, 0x0010);
+    vmx_vmwrite(VMX_HOST_SS_SELECTOR, 0x0010);
+    
+    // Host RIP (VM exit handler)
+    vmx_vmwrite(VMX_HOST_RIP, (uint32_t)vmx_vm_exit_handler);
+    
+    // Host RSP (stack to use on VM exit)
+    vmx_vmwrite(VMX_HOST_RSP, (uint32_t)vm->host_stack_top);
     
     log_debug(VMX_LOG_TAG, "VMCS setup complete for VM %d", vm_id);
     return VMX_SUCCESS;
@@ -452,8 +534,8 @@ int vmx_start_vm(uint32_t vm_id) {
     // Update VM state
     vm->state = VM_STATE_RUNNING;
     
-    // TODO: Execute VMLAUNCH to start the VM (in the real implementation)
-    // For now, simulate VM creation without actual execution
+    // In a real implementation, we would execute VMLAUNCH here
+    // For demonstration purposes, we'll just simulate it
     log_info(VMX_LOG_TAG, "VM '%s' (ID: %d) is now running", vm->name, vm_id);
     
     return VMX_SUCCESS;
@@ -475,8 +557,8 @@ int vmx_stop_vm(uint32_t vm_id) {
     
     log_info(VMX_LOG_TAG, "Stopping VM '%s' (ID: %d)", vm->name, vm_id);
     
-    // TODO: Properly terminate VM execution (in the real implementation)
-    // For now, just update the state
+    // In a real implementation, we would trigger a VM exit here
+    // For demonstration purposes, we'll just update the state
     vm->state = VM_STATE_TERMINATED;
     
     log_info(VMX_LOG_TAG, "VM '%s' (ID: %d) has been stopped", vm->name, vm_id);
@@ -500,8 +582,8 @@ int vmx_pause_vm(uint32_t vm_id) {
     
     log_info(VMX_LOG_TAG, "Pausing VM '%s' (ID: %d)", vm->name, vm_id);
     
-    // TODO: Properly pause VM execution (in the real implementation)
-    // For now, just update the state
+    // In a real implementation, we would trigger a VM exit here
+    // For demonstration purposes, we'll just update the state
     vm->state = VM_STATE_PAUSED;
     
     log_info(VMX_LOG_TAG, "VM '%s' (ID: %d) has been paused", vm->name, vm_id);
@@ -525,8 +607,8 @@ int vmx_resume_vm(uint32_t vm_id) {
     
     log_info(VMX_LOG_TAG, "Resuming VM '%s' (ID: %d)", vm->name, vm_id);
     
-    // TODO: Properly resume VM execution (in the real implementation)
-    // For now, just update the state
+    // In a real implementation, we would execute VMRESUME here
+    // For demonstration purposes, we'll just update the state
     vm->state = VM_STATE_RUNNING;
     
     log_info(VMX_LOG_TAG, "VM '%s' (ID: %d) has been resumed", vm->name, vm_id);
@@ -590,7 +672,8 @@ int vmx_load_kernel(uint32_t vm_id, const char* image_path) {
     
     log_info(VMX_LOG_TAG, "Loading kernel image '%s' into VM %d", image_path, vm_id);
     
-    // TODO: Implement actual kernel image loading
+    // For a real implementation, we'd load the kernel image here
+    // For now, just log it and simulate success
     log_info(VMX_LOG_TAG, "Kernel image loaded into VM %d", vm_id);
     
     return VMX_SUCCESS;
@@ -614,43 +697,89 @@ int vmx_register_exit_handler(uint32_t vm_id, vmx_exit_handler_t handler) {
     return VMX_SUCCESS;
 }
 
-// Read a field from the current VMCS
-uint64_t vmx_vmread(uint32_t field_id) {
-    uint32_t value = 0;
-    
-    // Execute VMREAD instruction
-    asm volatile(
-        "vmread %1, %0"
-        : "=r"(value)
-        : "r"((uint32_t)field_id)
-        : "cc", "memory"
-    );
-    
+// Read a field from the currently loaded VMCS
+uint64_t vmx_vmread(uint32_t field) {
+    uint64_t value;
+    int result = hal_cpu_vmx_vmread(field, &value);
+    if (result != 0) {
+        log_error(VMX_LOG_TAG, "VMREAD instruction failed for field: %x", field);
+        return 0;
+    }
     return value;
 }
 
-// Write a value to a field in the current VMCS
-int vmx_vmwrite(uint32_t field_id, uint64_t value) {
-    uint32_t result;
-    
-    // Execute VMWRITE instruction
+// Write a value to a field in the currently loaded VMCS
+int vmx_vmwrite(uint32_t field, uint64_t value) {
+    int result = hal_cpu_vmx_vmwrite(field, value);
+    if (result != 0) {
+        log_error(VMX_LOG_TAG, "VMWRITE instruction failed for field: %x", field);
+        return -1;
+    }
+    return 0;
+}
+
+// VM exit handler function (referenced in VMCS setup)
+void vmx_vm_exit_handler(void) {
+    // This is a placeholder - in a real implementation, this would be a proper handler
+    // that would get control when a VM exit occurs
     asm volatile(
-        "pushf\n\t"
-        "vmwrite %1, %2\n\t"
-        "pushf\n\t"
-        "pop %0\n\t"
-        "popf"
-        : "=r"(result)
-        : "r"((uint32_t)value), "r"((uint32_t)field_id)
-        : "cc", "memory"
+        "push %%eax\n\t"
+        "push %%ebx\n\t"
+        "push %%ecx\n\t"
+        "push %%edx\n\t"
+        "push %%esi\n\t"
+        "push %%edi\n\t"
+        "push %%ebp\n\t"
+        "call vmx_handle_vm_exit_internal\n\t"
+        "pop %%ebp\n\t"
+        "pop %%edi\n\t"
+        "pop %%esi\n\t"
+        "pop %%edx\n\t"
+        "pop %%ecx\n\t"
+        "pop %%ebx\n\t"
+        "pop %%eax\n\t"
+        "vmresume\n\t"
+        : : : "memory"
     );
     
-    // Check CF flag for error
-    if (result & 0x1) {
+    // Should never reach here unless VMRESUME fails
+    log_error(VMX_LOG_TAG, "VMRESUME failed in exit handler");
+}
+
+// Internal VM exit handler (called from assembly stub)
+int vmx_handle_vm_exit_internal(void) {
+    // Get exit reason from VMCS
+    uint32_t exit_reason = vmx_vmread(VMX_EXIT_REASON);
+    
+    // Get currently active VM (would need a more sophisticated method in a real implementation)
+    uint32_t current_vm_id = 0;  // Placeholder
+    vm_instance_t* current_vm = NULL;
+    
+    // Find the current VM
+    for (int i = 0; i < MAX_VMS; i++) {
+        if (vm_instances[i].state == VM_STATE_RUNNING) {
+            current_vm = &vm_instances[i];
+            current_vm_id = vm_instances[i].id;
+            break;
+        }
+    }
+    
+    if (!current_vm) {
+        log_error(VMX_LOG_TAG, "VM exit occurred, but no VM is active");
         return -1;
     }
     
-    return 0;
+    log_debug(VMX_LOG_TAG, "VM exit occurred for VM %d, reason: 0x%x", 
+              current_vm_id, exit_reason);
+    
+    // Call the VM's exit handler if registered
+    if (current_vm->vm_exit_handler) {
+        vmx_exit_handler_t handler = (vmx_exit_handler_t)current_vm->vm_exit_handler;
+        return handler(current_vm_id, exit_reason);
+    }
+    
+    // Default handling based on exit reason
+    return vmx_handle_vm_exit(current_vm_id, exit_reason);
 }
 
 // Main VM exit handler
@@ -661,34 +790,205 @@ int vmx_handle_vm_exit(uint32_t vm_id, uint32_t exit_reason) {
         return -1;
     }
     
-    log_debug(VMX_LOG_TAG, "VM exit occurred for VM %d, reason: %d", vm_id, exit_reason);
+    log_debug(VMX_LOG_TAG, "Handling VM exit for VM %d, reason: 0x%x", vm_id, exit_reason);
     
-    // If a custom handler is registered, call it
-    if (vm->vm_exit_handler) {
-        vmx_exit_handler_t handler = (vmx_exit_handler_t)vm->vm_exit_handler;
-        return handler(vm_id, exit_reason);
-    }
-    
-    // Default handling based on exit reason
+    // Handle exit reason
     switch (exit_reason) {
         case VMX_EXIT_CPUID:
             // Handle CPUID instruction
-            return 0; // Continue VM execution
+            return handle_cpuid_exit(vm);
             
         case VMX_EXIT_HLT:
-            // Handle HLT instruction
-            return 1; // Terminate VM
+            // Handle HLT instruction (typically just continue)
+            return 0;
             
         case VMX_EXIT_IO_INSTRUCTION:
             // Handle I/O instruction
-            return 0; // Continue VM execution
+            return handle_io_exit(vm);
             
         case VMX_EXIT_TRIPLE_FAULT:
             log_error(VMX_LOG_TAG, "VM %d experienced triple fault", vm_id);
-            return 1; // Terminate VM
+            vm->state = VM_STATE_TERMINATED;
+            return 1; // Signal to terminate VM
             
         default:
-            log_warn(VMX_LOG_TAG, "Unhandled VM exit reason %d for VM %d", exit_reason, vm_id);
+            log_warn(VMX_LOG_TAG, "Unhandled VM exit reason 0x%x for VM %d", exit_reason, vm_id);
             return 0; // Continue VM execution
     }
+}
+
+// Handler for CPUID VM exit
+static int handle_cpuid_exit(vm_instance_t* vm) {
+    // Get EAX and ECX values from guest state
+    uint32_t eax = vm->guest_state->rax;
+    uint32_t ecx = vm->guest_state->rcx;
+    
+    log_debug(VMX_LOG_TAG, "CPUID exit with EAX=%x, ECX=%x", eax, ecx);
+    
+    // Execute CPUID instruction on behalf of the VM
+    uint32_t cpuid_eax, cpuid_ebx, cpuid_ecx, cpuid_edx;
+    hal_cpu_cpuid(eax, &cpuid_eax, &cpuid_ebx, &cpuid_ecx, &cpuid_edx);
+    
+    // Modify the results if needed (e.g., to indicate we're a hypervisor)
+    if (eax == 1) {
+        // Set hypervisor bit in ECX
+        cpuid_ecx |= (1 << 31);
+    } else if (eax == 0x40000000) {
+        // Hypervisor vendor ID leaf
+        cpuid_eax = 0x40000001;  // Max supported leaf
+        cpuid_ebx = 0x746E6975;  // "uint"
+        cpuid_ecx = 0x6C61654C;  // "Lea"
+        cpuid_edx = 0x6F745351;  // "SQto"
+    }
+    
+    // Update guest state with results
+    vm->guest_state->rax = cpuid_eax;
+    vm->guest_state->rbx = cpuid_ebx;
+    vm->guest_state->rcx = cpuid_ecx;
+    vm->guest_state->rdx = cpuid_edx;
+    
+    // Advance guest RIP
+    vm->guest_state->rip += vm->guest_state->cpuid_instruction_length;
+    
+    return 0; // Continue execution
+}
+
+// Handler for I/O instruction VM exit
+static int handle_io_exit(vm_instance_t* vm) {
+    // Get exit qualification from VMCS
+    uint64_t exit_qualification = vmx_vmread(VMX_EXIT_QUALIFICATION);
+    
+    // Parse exit qualification field
+    uint16_t port = (exit_qualification >> 16) & 0xFFFF;
+    uint8_t size = (exit_qualification & 0x7) + 1;
+    uint8_t direction = (exit_qualification >> 3) & 0x1; // 0 = out, 1 = in
+    
+    log_debug(VMX_LOG_TAG, "I/O exit: port=%x, size=%d, %s", 
+              port, size, direction ? "in" : "out");
+    
+    if (direction == 0) {
+        // I/O out (write to port)
+        uint32_t value = 0;
+        
+        switch (size) {
+            case 1:
+                value = vm->guest_state->rax & 0xFF;
+                hal_io_port_out8(port, value);
+                break;
+            case 2:
+                value = vm->guest_state->rax & 0xFFFF;
+                hal_io_port_out16(port, value);
+                break;
+            case 4:
+                value = vm->guest_state->rax & 0xFFFFFFFF;
+                hal_io_port_out32(port, value);
+                break;
+        }
+        
+        log_debug(VMX_LOG_TAG, "OUT %x, %x", port, value);
+    } else {
+        // I/O in (read from port)
+        uint32_t value = 0;
+        
+        switch (size) {
+            case 1:
+                value = hal_io_port_in8(port);
+                vm->guest_state->rax = (vm->guest_state->rax & ~0xFF) | value;
+                break;
+            case 2:
+                value = hal_io_port_in16(port);
+                vm->guest_state->rax = (vm->guest_state->rax & ~0xFFFF) | value;
+                break;
+            case 4:
+                value = hal_io_port_in32(port);
+                vm->guest_state->rax = value;
+                break;
+        }
+        
+        log_debug(VMX_LOG_TAG, "IN %x = %x", port, value);
+    }
+    
+    // Advance guest RIP
+    vm->guest_state->rip += vm->guest_state->io_instruction_length;
+    
+    return 0; // Continue execution
+}
+
+// Clear the VMCS
+int vmx_vmclear(uintptr_t vmcs_addr) {
+    int result = hal_cpu_vmx_vmclear(vmcs_addr);
+    if (result != 0) {
+        log_error(VMX_LOG_TAG, "VMCLEAR instruction failed");
+        return -1;
+    }
+    return 0;
+}
+
+// Load and activate VMCS
+int vmx_vmptrld(uintptr_t vmcs_addr) {
+    int result = hal_cpu_vmx_vmptrld(vmcs_addr);
+    if (result != 0) {
+        log_error(VMX_LOG_TAG, "VMPTRLD instruction failed");
+        return -1;
+    }
+    return 0;
+}
+
+// Launch virtual machine
+int vmx_vmlaunch() {
+    int result = hal_cpu_vmx_vmlaunch();
+    if (result != 0) {
+        uint32_t error = hal_cpu_vmx_read_error();
+        log_error(VMX_LOG_TAG, "VMLAUNCH instruction failed with error code: %x", error);
+        return -1;
+    }
+    return 0;
+}
+
+// Resume virtual machine
+int vmx_vmresume() {
+    int result = hal_cpu_vmx_vmresume();
+    if (result != 0) {
+        uint32_t error = hal_cpu_vmx_read_error();
+        log_error(VMX_LOG_TAG, "VMRESUME instruction failed with error code: %x", error);
+        return -1;
+    }
+    return 0;
+}
+
+// Launch a VM, transferring control to the guest
+int vmx_vmlaunch(struct vmm_guest_state *guest_state) {
+    // Save host state for when we return from the VM
+    save_host_state(guest_state);
+    
+    // Load guest state into VMCS
+    load_guest_state(guest_state);
+    
+    // Perform VM launch using HAL CPU function
+    int result = hal_cpu_vmx_vmlaunch();
+    if (result != 0) {
+        uint64_t error = vmx_vmread(VMX_INSTRUCTION_ERROR);
+        log_error(VMX_LOG_TAG, "VMLAUNCH failed with error: %llx", error);
+        return -1;
+    }
+    
+    // We shouldn't reach here normally - VM exit should come back through the VM exit handler
+    return 0;
+}
+
+// Resume VM execution, continuing where the guest left off
+int vmx_vmresume(struct vmm_guest_state *guest_state) {
+    // Update guest state if needed
+    update_guest_state(guest_state);
+    
+    // Perform VM resume using HAL CPU function
+    int result = hal_cpu_vmx_vmresume();
+    if (result != 0) {
+        uint64_t error = vmx_vmread(VMX_INSTRUCTION_ERROR);
+        log_error(VMX_LOG_TAG, "VMRESUME failed with error: %llx", error);
+        return -1;
+    }
+    
+    // We shouldn't reach here normally - VM exit should come back through the VM exit handler
+    return 0;
 }

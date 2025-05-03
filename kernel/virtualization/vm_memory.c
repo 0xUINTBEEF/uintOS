@@ -295,3 +295,38 @@ int vm_memory_setup_ept(uint32_t vm_id) {
     
     return VM_MEM_SUCCESS;
 }
+
+// Allocate memory for the guest VM physical memory
+void *vm_memory_allocate_physical(size_t size) {
+    // Use HAL memory allocation for aligned physical memory
+    return hal_memory_allocate_physical(size, PAGE_SIZE_4K);
+}
+
+// Map guest memory to EPT structures
+int vm_memory_map_ept(ept_pml4e_t *ept_pml4, uint64_t guest_physical, uint64_t host_physical, size_t size, uint32_t permissions) {
+    // Calculate number of pages to map
+    size_t pages = (size + PAGE_SIZE_4K - 1) / PAGE_SIZE_4K;
+    
+    for (size_t i = 0; i < pages; i++) {
+        uint64_t gpa = guest_physical + (i * PAGE_SIZE_4K);
+        uint64_t hpa = host_physical + (i * PAGE_SIZE_4K);
+        
+        // Use HAL memory functions to ensure proper physical address translation
+        uint64_t real_hpa = hal_memory_virtual_to_physical((void*)hpa);
+        
+        int result = ept_map_page(ept_pml4, gpa, real_hpa, permissions);
+        if (result != 0) {
+            return result;
+        }
+    }
+    
+    // Flush TLB using HAL CPU function to ensure EPT changes take effect
+    hal_cpu_invept_all_contexts();
+    
+    return 0;
+}
+
+// Free guest VM physical memory
+void vm_memory_free_physical(void *memory, size_t size) {
+    hal_memory_free_physical(memory);
+}
