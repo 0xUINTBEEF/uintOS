@@ -1,1777 +1,1192 @@
 /**
  * @file controls.c
- * @brief UI Control implementations for uintOS GUI
+ * @brief UI controls implementation for the GUI
  */
-
-#include "controls.h"
-#include "../graphics/graphics.h"
-#include "../logging/log.h"
-#include "../../hal/include/hal_memory.h"
+#include <stdint.h>
+#include <stddef.h>
 #include <string.h>
+#include "controls.h"
+#include "window.h"
+#include "clipboard.h"
+#include "../logging/log.h"
+#include "../graphics/graphics.h"
 
-/* Forward declarations of rendering functions */
-static void button_render(control_t* control);
-static void label_render(control_t* control);
-static void checkbox_render(control_t* control);
-static void textbox_render(control_t* control);
-static void radiobutton_render(control_t* control);
-static void listbox_render(control_t* control);
-static void progressbar_render(control_t* control);
+// Global control pool to avoid dynamic memory allocation
+#define MAX_CONTROLS 128
+static control_t controls[MAX_CONTROLS];
+static int control_count = 0;
 
-/* Forward declarations of event handlers */
-static void button_handle_event(control_t* control, event_t* event, void* user_data);
-static void checkbox_handle_event(control_t* control, event_t* event, void* user_data);
-static void textbox_handle_event(control_t* control, event_t* event, void* user_data);
-static void radiobutton_handle_event(control_t* control, event_t* event, void* user_data);
-static void listbox_handle_event(control_t* control, event_t* event, void* user_data);
-
-/* Forward declarations of cleanup functions */
-static void button_destroy(control_t* control);
-static void label_destroy(control_t* control);
-static void checkbox_destroy(control_t* control);
-static void textbox_destroy(control_t* control);
-static void radiobutton_destroy(control_t* control);
-static void listbox_destroy(control_t* control);
-static void progressbar_destroy(control_t* control);
-
-/* Helper functions */
-static void draw_3d_rect(control_t* control, int x, int y, int width, int height, int raised);
-static void draw_text_aligned(int x, int y, int width, int height, const char* text, text_align_t align, uint32_t color);
+// The currently focused control
+static control_t* focused_control = NULL;
 
 /**
- * Create a button control
+ * Create a new basic control
  */
-control_t* button_create(int x, int y, int width, int height, const char* text, int style) {
-    // Allocate control structure
-    control_t* control = hal_memory_alloc(sizeof(control_t));
-    if (!control) {
-        LOG(LOG_ERROR, "Failed to allocate memory for button control");
+static control_t* control_create_basic(
+    int x, int y, int width, int height,
+    uint32_t flags, control_type_t type
+) {
+    if (control_count >= MAX_CONTROLS) {
+        log_error("CONTROL", "Cannot create control, maximum control count reached");
         return NULL;
     }
     
-    // Clear the control data
-    memset(control, 0, sizeof(control_t));
+    control_t* control = &controls[control_count++];
     
-    // Set control properties
+    // Initialize control properties
     control->x = x;
     control->y = y;
     control->width = width;
     control->height = height;
-    control->bg_color = CONTROL_COLOR_BG;
-    control->fg_color = CONTROL_COLOR_FG;
-    control->flags = CONTROL_FLAG_VISIBLE | CONTROL_FLAG_ENABLED | CONTROL_FLAG_TABSTOP;
-    control->render = button_render;
-    control->handler = button_handle_event;
-    control->destroy = button_destroy;
+    control->flags = flags;
+    control->type = type;
+    control->parent = NULL;
+    control->pressed = 0;
+    control->render = NULL;
+    control->on_click = NULL;
+    control->on_key = NULL;
+    control->user_data = NULL;
     
-    // Allocate button-specific data
-    button_data_t* data = hal_memory_alloc(sizeof(button_data_t));
-    if (!data) {
-        LOG(LOG_ERROR, "Failed to allocate memory for button data");
-        hal_memory_free(control);
-        return NULL;
-    }
-    
-    // Initialize button data
-    memset(data, 0, sizeof(button_data_t));
-    strncpy(data->text, text, sizeof(data->text) - 1);
-    data->text_align = TEXT_ALIGN_CENTER;
-    data->style = style;
-    data->state = BUTTON_STATE_NORMAL;
-    
-    // Set user data to button data
-    control->user_data = data;
+    // Clear text buffer
+    memset(control->text, 0, CONTROL_TEXT_MAX_LENGTH);
     
     return control;
-}
-
-/**
- * Set button click handler
- */
-void button_set_click_handler(control_t* button, void (*on_click)(control_t*)) {
-    if (!button || !button->user_data) return;
-    
-    button_data_t* data = (button_data_t*)button->user_data;
-    data->on_click = on_click;
-}
-
-/**
- * Set button text
- */
-void button_set_text(control_t* button, const char* text) {
-    if (!button || !button->user_data || !text) return;
-    
-    button_data_t* data = (button_data_t*)button->user_data;
-    strncpy(data->text, text, sizeof(data->text) - 1);
-    data->text[sizeof(data->text) - 1] = '\0';
-    
-    // Redraw the button
-    if (button->parent && button->render) {
-        button->render(button);
-    }
-}
-
-/**
- * Handle button events
- */
-static void button_handle_event(control_t* control, event_t* event, void* user_data) {
-    if (!control || !control->user_data || !event) return;
-    
-    button_data_t* data = (button_data_t*)control->user_data;
-    
-    // Handle only if enabled
-    if (!(control->flags & CONTROL_FLAG_ENABLED)) return;
-    
-    switch (event->type) {
-        case EVENT_MOUSE_MOVE:
-            // Handle hover state
-            data->state = BUTTON_STATE_HOVER;
-            if (control->render) control->render(control);
-            break;
-            
-        case EVENT_MOUSE_DOWN:
-            if (event->data.mouse.button == MOUSE_BUTTON_LEFT) {
-                // Handle press state
-                data->state = BUTTON_STATE_PRESSED;
-                if (control->render) control->render(control);
-            }
-            break;
-            
-        case EVENT_MOUSE_UP:
-            if (event->data.mouse.button == MOUSE_BUTTON_LEFT) {
-                // Check if mouse is still over the button
-                if (event->data.mouse.x >= 0 && event->data.mouse.x < control->width &&
-                    event->data.mouse.y >= 0 && event->data.mouse.y < control->height) {
-                    
-                    // Handle click event
-                    if (data->on_click) {
-                        data->on_click(control);
-                    }
-                }
-                
-                // Reset state
-                data->state = BUTTON_STATE_NORMAL;
-                if (control->render) control->render(control);
-            }
-            break;
-            
-        default:
-            break;
-    }
-}
-
-/**
- * Render button control
- */
-static void button_render(control_t* control) {
-    if (!control || !control->user_data || !control->parent) return;
-    
-    button_data_t* data = (button_data_t*)control->user_data;
-    framebuffer_t* fb = graphics_get_framebuffer();
-    
-    if (!fb) return;
-    
-    // Skip if not visible
-    if (!(control->flags & CONTROL_FLAG_VISIBLE)) return;
-    
-    // Calculate absolute position
-    int abs_x = control->parent->x + control->parent->client_x + control->x;
-    int abs_y = control->parent->y + control->parent->client_y + control->y;
-    
-    // Draw button background
-    uint32_t bg_color = control->bg_color;
-    
-    // Adjust color based on state
-    if (!(control->flags & CONTROL_FLAG_ENABLED)) {
-        // Disabled
-        bg_color = CONTROL_COLOR_DISABLED;
-    } else if (data->state == BUTTON_STATE_PRESSED) {
-        // Pressed - darken
-        uint8_t r = ((bg_color >> 16) & 0xFF) * 0.8;
-        uint8_t g = ((bg_color >> 8) & 0xFF) * 0.8;
-        uint8_t b = (bg_color & 0xFF) * 0.8;
-        bg_color = (r << 16) | (g << 8) | b;
-    } else if (data->state == BUTTON_STATE_HOVER) {
-        // Hover - lighten
-        uint8_t r = ((bg_color >> 16) & 0xFF) * 1.1;
-        if (r > 255) r = 255;
-        uint8_t g = ((bg_color >> 8) & 0xFF) * 1.1;
-        if (g > 255) g = 255;
-        uint8_t b = (bg_color & 0xFF) * 1.1;
-        if (b > 255) b = 255;
-        bg_color = (r << 16) | (g << 8) | b;
-    }
-    
-    // Draw button based on style
-    switch (data->style) {
-        case BUTTON_STYLE_FLAT:
-            // Simple filled rectangle
-            graphics_draw_rect(abs_x, abs_y, control->width, control->height, bg_color, 1);
-            
-            // Draw border
-            graphics_draw_rect(abs_x, abs_y, control->width, control->height, CONTROL_COLOR_BORDER, 0);
-            break;
-            
-        case BUTTON_STYLE_3D:
-            // Fill background
-            graphics_draw_rect(abs_x, abs_y, control->width, control->height, bg_color, 1);
-            
-            // Draw 3D effect
-            draw_3d_rect(control, abs_x, abs_y, control->width, control->height, 
-                        data->state != BUTTON_STATE_PRESSED);
-            break;
-            
-        case BUTTON_STYLE_NORMAL:
-        default:
-            // Fill background
-            graphics_draw_rect(abs_x, abs_y, control->width, control->height, bg_color, 1);
-            
-            // Draw border
-            graphics_draw_rect(abs_x, abs_y, control->width, control->height, CONTROL_COLOR_BORDER, 0);
-            
-            // Draw slight 3D effect
-            if (data->state == BUTTON_STATE_PRESSED) {
-                // Pressed - darker bottom-right edge
-                graphics_draw_line(abs_x + 1, abs_y + control->height - 1, 
-                                abs_x + control->width - 1, abs_y + control->height - 1, 
-                                CONTROL_COLOR_BORDER);
-                graphics_draw_line(abs_x + control->width - 1, abs_y + 1, 
-                                abs_x + control->width - 1, abs_y + control->height - 1, 
-                                CONTROL_COLOR_BORDER);
-            } else {
-                // Normal - highlight top-left edge
-                graphics_draw_line(abs_x + 1, abs_y + 1, 
-                                abs_x + control->width - 2, abs_y + 1, 
-                                COLOR_WHITE);
-                graphics_draw_line(abs_x + 1, abs_y + 1, 
-                                abs_x + 1, abs_y + control->height - 2, 
-                                COLOR_WHITE);
-            }
-            break;
-    }
-    
-    // Draw text
-    int text_y_offset = data->state == BUTTON_STATE_PRESSED ? 1 : 0;
-    draw_text_aligned(abs_x + 2, abs_y + 2 + text_y_offset, 
-                    control->width - 4, control->height - 4, 
-                    data->text, data->text_align, 
-                    control->flags & CONTROL_FLAG_ENABLED ? control->fg_color : CONTROL_COLOR_DISABLED);
-}
-
-/**
- * Clean up button resources
- */
-static void button_destroy(control_t* control) {
-    if (!control) return;
-    
-    // Free button-specific data
-    if (control->user_data) {
-        hal_memory_free(control->user_data);
-        control->user_data = NULL;
-    }
 }
 
 /**
  * Create a label control
  */
-control_t* label_create(int x, int y, int width, int height, const char* text, text_align_t align) {
-    // Allocate control structure
-    control_t* control = hal_memory_alloc(sizeof(control_t));
-    if (!control) {
-        LOG(LOG_ERROR, "Failed to allocate memory for label control");
-        return NULL;
-    }
+control_t* control_create_label(
+    int x, int y, int width, int height,
+    const char* text, uint32_t flags
+) {
+    control_t* control = control_create_basic(x, y, width, height, flags, CONTROL_TYPE_LABEL);
+    if (!control) return NULL;
     
-    // Clear the control data
-    memset(control, 0, sizeof(control_t));
-    
-    // Set control properties
-    control->x = x;
-    control->y = y;
-    control->width = width;
-    control->height = height;
-    control->bg_color = CONTROL_COLOR_BG;
-    control->fg_color = CONTROL_COLOR_FG;
-    control->flags = CONTROL_FLAG_VISIBLE | CONTROL_FLAG_ENABLED | CONTROL_FLAG_TRANSPARENT;
-    control->render = label_render;
-    control->destroy = label_destroy;
-    
-    // Allocate label-specific data
-    label_data_t* data = hal_memory_alloc(sizeof(label_data_t));
-    if (!data) {
-        LOG(LOG_ERROR, "Failed to allocate memory for label data");
-        hal_memory_free(control);
-        return NULL;
-    }
-    
-    // Initialize label data
-    memset(data, 0, sizeof(label_data_t));
-    strncpy(data->text, text, sizeof(data->text) - 1);
-    data->text_align = align;
-    
-    // Set user data to label data
-    control->user_data = data;
+    // Copy the text
+    strncpy(control->text, text, CONTROL_TEXT_MAX_LENGTH - 1);
+    control->text[CONTROL_TEXT_MAX_LENGTH - 1] = '\0';
     
     return control;
 }
 
 /**
- * Set label text
+ * Create a button control
  */
-void label_set_text(control_t* label, const char* text) {
-    if (!label || !label->user_data || !text) return;
+control_t* control_create_button(
+    int x, int y, int width, int height,
+    const char* text, uint32_t flags
+) {
+    control_t* control = control_create_basic(x, y, width, height, flags, CONTROL_TYPE_BUTTON);
+    if (!control) return NULL;
     
-    label_data_t* data = (label_data_t*)label->user_data;
-    strncpy(data->text, text, sizeof(data->text) - 1);
-    data->text[sizeof(data->text) - 1] = '\0';
-    
-    // Redraw the label
-    if (label->parent && label->render) {
-        label->render(label);
-    }
-}
-
-/**
- * Render label control
- */
-static void label_render(control_t* control) {
-    if (!control || !control->user_data || !control->parent) return;
-    
-    label_data_t* data = (label_data_t*)control->user_data;
-    framebuffer_t* fb = graphics_get_framebuffer();
-    
-    if (!fb) return;
-    
-    // Skip if not visible
-    if (!(control->flags & CONTROL_FLAG_VISIBLE)) return;
-    
-    // Calculate absolute position
-    int abs_x = control->parent->x + control->parent->client_x + control->x;
-    int abs_y = control->parent->y + control->parent->client_y + control->y;
-    
-    // Draw background if not transparent
-    if (!(control->flags & CONTROL_FLAG_TRANSPARENT)) {
-        graphics_draw_rect(abs_x, abs_y, control->width, control->height, control->bg_color, 1);
-    }
-    
-    // Draw text
-    draw_text_aligned(abs_x, abs_y, control->width, control->height, data->text, data->text_align, control->fg_color);
-}
-
-/**
- * Clean up label resources
- */
-static void label_destroy(control_t* control) {
-    if (!control) return;
-    
-    // Free label-specific data
-    if (control->user_data) {
-        hal_memory_free(control->user_data);
-        control->user_data = NULL;
-    }
-}
-
-/**
- * Create a checkbox control
- */
-control_t* checkbox_create(int x, int y, int width, int height, const char* text, int checked) {
-    // Allocate control structure
-    control_t* control = hal_memory_alloc(sizeof(control_t));
-    if (!control) {
-        LOG(LOG_ERROR, "Failed to allocate memory for checkbox control");
-        return NULL;
-    }
-    
-    // Clear the control data
-    memset(control, 0, sizeof(control_t));
-    
-    // Set control properties
-    control->x = x;
-    control->y = y;
-    control->width = width;
-    control->height = height;
-    control->bg_color = CONTROL_COLOR_BG;
-    control->fg_color = CONTROL_COLOR_FG;
-    control->flags = CONTROL_FLAG_VISIBLE | CONTROL_FLAG_ENABLED | CONTROL_FLAG_TABSTOP;
-    control->render = checkbox_render;
-    control->handler = checkbox_handle_event;
-    control->destroy = checkbox_destroy;
-    
-    // Allocate checkbox-specific data
-    checkbox_data_t* data = hal_memory_alloc(sizeof(checkbox_data_t));
-    if (!data) {
-        LOG(LOG_ERROR, "Failed to allocate memory for checkbox data");
-        hal_memory_free(control);
-        return NULL;
-    }
-    
-    // Initialize checkbox data
-    memset(data, 0, sizeof(checkbox_data_t));
-    strncpy(data->text, text, sizeof(data->text) - 1);
-    data->checked = checked;
-    
-    // Set user data to checkbox data
-    control->user_data = data;
+    // Copy the text
+    strncpy(control->text, text, CONTROL_TEXT_MAX_LENGTH - 1);
+    control->text[CONTROL_TEXT_MAX_LENGTH - 1] = '\0';
     
     return control;
-}
-
-/**
- * Get checkbox state
- */
-int checkbox_get_checked(control_t* checkbox) {
-    if (!checkbox || !checkbox->user_data) return 0;
-    
-    checkbox_data_t* data = (checkbox_data_t*)checkbox->user_data;
-    return data->checked;
-}
-
-/**
- * Set checkbox state
- */
-void checkbox_set_checked(control_t* checkbox, int checked) {
-    if (!checkbox || !checkbox->user_data) return;
-    
-    checkbox_data_t* data = (checkbox_data_t*)checkbox->user_data;
-    if (data->checked != checked) {
-        data->checked = checked;
-        
-        // Call change handler if available
-        if (data->on_change) {
-            data->on_change(checkbox, checked);
-        }
-        
-        // Redraw the checkbox
-        if (checkbox->parent && checkbox->render) {
-            checkbox->render(checkbox);
-        }
-    }
-}
-
-/**
- * Set checkbox change handler
- */
-void checkbox_set_change_handler(control_t* checkbox, void (*on_change)(control_t*, int)) {
-    if (!checkbox || !checkbox->user_data) return;
-    
-    checkbox_data_t* data = (checkbox_data_t*)checkbox->user_data;
-    data->on_change = on_change;
-}
-
-/**
- * Handle checkbox events
- */
-static void checkbox_handle_event(control_t* control, event_t* event, void* user_data) {
-    if (!control || !control->user_data || !event) return;
-    
-    // Handle only if enabled
-    if (!(control->flags & CONTROL_FLAG_ENABLED)) return;
-    
-    checkbox_data_t* data = (checkbox_data_t*)control->user_data;
-    
-    if (event->type == EVENT_MOUSE_UP && event->data.mouse.button == MOUSE_BUTTON_LEFT) {
-        // Toggle checkbox state
-        data->checked = !data->checked;
-        
-        // Call change handler if available
-        if (data->on_change) {
-            data->on_change(control, data->checked);
-        }
-        
-        // Redraw the checkbox
-        if (control->render) {
-            control->render(control);
-        }
-    }
-}
-
-/**
- * Render checkbox control
- */
-static void checkbox_render(control_t* control) {
-    if (!control || !control->user_data || !control->parent) return;
-    
-    checkbox_data_t* data = (checkbox_data_t*)control->user_data;
-    framebuffer_t* fb = graphics_get_framebuffer();
-    
-    if (!fb) return;
-    
-    // Skip if not visible
-    if (!(control->flags & CONTROL_FLAG_VISIBLE)) return;
-    
-    // Calculate absolute position
-    int abs_x = control->parent->x + control->parent->client_x + control->x;
-    int abs_y = control->parent->y + control->parent->client_y + control->y;
-    
-    // Calculate checkbox box size and position
-    int box_size = control->height - 4;
-    if (box_size < 8) box_size = 8;
-    if (box_size > 16) box_size = 16;
-    
-    int box_x = abs_x + 2;
-    int box_y = abs_y + (control->height - box_size) / 2;
-    
-    // Draw checkbox box
-    graphics_draw_rect(box_x, box_y, box_size, box_size, COLOR_WHITE, 1);
-    graphics_draw_rect(box_x, box_y, box_size, box_size, CONTROL_COLOR_BORDER, 0);
-    
-    // Draw checkbox mark if checked
-    if (data->checked) {
-        for (int i = 0; i < box_size - 4; i++) {
-            graphics_draw_line(box_x + 2 + i, box_y + 2 + i, 
-                             box_x + 2 + i, box_y + box_size - 2 - i, 
-                             control->flags & CONTROL_FLAG_ENABLED ? control->fg_color : CONTROL_COLOR_DISABLED);
-            graphics_draw_line(box_x + 2 + i, box_y + box_size - 2 - i, 
-                             box_x + box_size - 2, box_y + 2, 
-                             control->flags & CONTROL_FLAG_ENABLED ? control->fg_color : CONTROL_COLOR_DISABLED);
-        }
-    }
-    
-    // Draw text
-    int text_x = box_x + box_size + 4;
-    int text_width = control->width - (text_x - abs_x);
-    draw_text_aligned(text_x, abs_y, text_width, control->height, 
-                    data->text, TEXT_ALIGN_LEFT, 
-                    control->flags & CONTROL_FLAG_ENABLED ? control->fg_color : CONTROL_COLOR_DISABLED);
-}
-
-/**
- * Clean up checkbox resources
- */
-static void checkbox_destroy(control_t* control) {
-    if (!control) return;
-    
-    // Free checkbox-specific data
-    if (control->user_data) {
-        hal_memory_free(control->user_data);
-        control->user_data = NULL;
-    }
 }
 
 /**
  * Create a textbox control
  */
-control_t* textbox_create(int x, int y, int width, int height, int max_len, int is_multiline) {
-    // Allocate control structure
-    control_t* control = hal_memory_alloc(sizeof(control_t));
-    if (!control) {
-        LOG(LOG_ERROR, "Failed to allocate memory for textbox control");
-        return NULL;
-    }
+control_t* control_create_textbox(
+    int x, int y, int width, int height,
+    const char* text, uint32_t flags
+) {
+    control_t* control = control_create_basic(
+        x, y, width, height, 
+        flags | CONTROL_FLAG_CAN_FOCUS, 
+        CONTROL_TYPE_TEXTBOX
+    );
+    if (!control) return NULL;
     
-    // Clear the control data
-    memset(control, 0, sizeof(control_t));
+    // Copy the text
+    strncpy(control->text, text, CONTROL_TEXT_MAX_LENGTH - 1);
+    control->text[CONTROL_TEXT_MAX_LENGTH - 1] = '\0';
     
-    // Set control properties
-    control->x = x;
-    control->y = y;
-    control->width = width;
-    control->height = height;
-    control->bg_color = COLOR_WHITE;
-    control->fg_color = CONTROL_COLOR_FG;
-    control->flags = CONTROL_FLAG_VISIBLE | CONTROL_FLAG_ENABLED | CONTROL_FLAG_TABSTOP | CONTROL_FLAG_BORDER;
-    control->render = textbox_render;
-    control->handler = textbox_handle_event;
-    control->destroy = textbox_destroy;
-    
-    // Allocate textbox-specific data
-    textbox_data_t* data = hal_memory_alloc(sizeof(textbox_data_t));
-    if (!data) {
-        LOG(LOG_ERROR, "Failed to allocate memory for textbox data");
-        hal_memory_free(control);
-        return NULL;
-    }
-    
-    // Initialize textbox data
-    memset(data, 0, sizeof(textbox_data_t));
-    data->max_len = max_len > 0 ? max_len : 1024;
-    data->is_multiline = is_multiline;
-    data->cursor_pos = 0;
-    data->selection_start = -1;
-    data->selection_end = -1;
-    
-    // Allocate text buffer
-    data->text = hal_memory_alloc(data->max_len + 1);
-    if (!data->text) {
-        LOG(LOG_ERROR, "Failed to allocate textbox text buffer");
-        hal_memory_free(data);
-        hal_memory_free(control);
-        return NULL;
-    }
-    
-    // Clear text buffer
-    memset(data->text, 0, data->max_len + 1);
-    
-    // Set user data to textbox data
-    control->user_data = data;
+    // Set text cursor position to end of text
+    control->cursor_pos = strlen(control->text);
     
     return control;
 }
 
 /**
- * Get textbox text
+ * Create a checkbox control
  */
-const char* textbox_get_text(control_t* textbox) {
-    if (!textbox || !textbox->user_data) return NULL;
+control_t* control_create_checkbox(
+    int x, int y, int width, int height,
+    const char* text, uint32_t flags
+) {
+    control_t* control = control_create_basic(x, y, width, height, flags, CONTROL_TYPE_CHECKBOX);
+    if (!control) return NULL;
     
-    textbox_data_t* data = (textbox_data_t*)textbox->user_data;
-    return data->text;
-}
-
-/**
- * Set textbox text
- */
-void textbox_set_text(control_t* textbox, const char* text) {
-    if (!textbox || !textbox->user_data || !text) return;
+    // Copy the text
+    strncpy(control->text, text, CONTROL_TEXT_MAX_LENGTH - 1);
+    control->text[CONTROL_TEXT_MAX_LENGTH - 1] = '\0';
     
-    textbox_data_t* data = (textbox_data_t*)textbox->user_data;
-    
-    // Copy text, ensuring it doesn't exceed buffer size
-    strncpy(data->text, text, data->max_len);
-    data->text[data->max_len] = '\0';
-    
-    // Update text length
-    data->text_len = strlen(data->text);
-    
-    // Reset cursor and selection
-    data->cursor_pos = data->text_len;
-    data->selection_start = -1;
-    data->selection_end = -1;
-    
-    // Call change handler if available
-    if (data->on_change) {
-        data->on_change(textbox);
-    }
-    
-    // Redraw the textbox
-    if (textbox->parent && textbox->render) {
-        textbox->render(textbox);
-    }
-}
-
-/**
- * Set whether textbox is a password field
- */
-void textbox_set_password(control_t* textbox, int is_password) {
-    if (!textbox || !textbox->user_data) return;
-    
-    textbox_data_t* data = (textbox_data_t*)textbox->user_data;
-    data->is_password = is_password;
-    
-    // Redraw the textbox
-    if (textbox->parent && textbox->render) {
-        textbox->render(textbox);
-    }
-}
-
-/**
- * Set textbox change handler
- */
-void textbox_set_change_handler(control_t* textbox, void (*on_change)(control_t*)) {
-    if (!textbox || !textbox->user_data) return;
-    
-    textbox_data_t* data = (textbox_data_t*)textbox->user_data;
-    data->on_change = on_change;
-}
-
-/**
- * Handle textbox events
- */
-static void textbox_handle_event(control_t* control, event_t* event, void* user_data) {
-    if (!control || !control->user_data || !event) return;
-    
-    // Handle only if enabled
-    if (!(control->flags & CONTROL_FLAG_ENABLED)) return;
-    
-    textbox_data_t* data = (textbox_data_t*)control->user_data;
-    
-    switch (event->type) {
-        case EVENT_MOUSE_DOWN:
-            if (event->data.mouse.button == MOUSE_BUTTON_LEFT) {
-                // Set focus to this control
-                if (control->parent) {
-                    for (int i = 0; i < control->parent->control_count; i++) {
-                        control_t* other = control->parent->controls[i];
-                        if (other && other != control && (other->flags & CONTROL_FLAG_FOCUSED)) {
-                            other->flags &= ~CONTROL_FLAG_FOCUSED;
-                            if (other->render) other->render(other);
-                        }
-                    }
-                }
-                
-                control->flags |= CONTROL_FLAG_FOCUSED;
-                
-                // Set cursor position based on click position
-                // TODO: Implement more accurate cursor positioning based on text metrics
-                int click_x = event->data.mouse.x;
-                data->cursor_pos = (click_x * data->text_len) / (control->width - 8);
-                if (data->cursor_pos > data->text_len) {
-                    data->cursor_pos = data->text_len;
-                }
-                
-                // Clear selection
-                data->selection_start = -1;
-                data->selection_end = -1;
-                
-                // Redraw
-                if (control->render) control->render(control);
-            }
-            break;
-            
-        case EVENT_KEY_DOWN:
-            if (control->flags & CONTROL_FLAG_FOCUSED) {
-                char key = event->data.key.key;
-                int scancode = event->data.key.scancode;
-                
-                // Handle special keys
-                switch (scancode) {
-                    case 0x0E: // Backspace
-                        if (data->cursor_pos > 0) {
-                            // Remove character before cursor
-                            for (int i = data->cursor_pos - 1; i < data->text_len; i++) {
-                                data->text[i] = data->text[i + 1];
-                            }
-                            data->text_len--;
-                            data->cursor_pos--;
-                            
-                            // Call change handler
-                            if (data->on_change) {
-                                data->on_change(control);
-                            }
-                            
-                            // Redraw
-                            if (control->render) control->render(control);
-                        }
-                        break;
-                        
-                    case 0x53: // Delete
-                        if (data->cursor_pos < data->text_len) {
-                            // Remove character at cursor
-                            for (int i = data->cursor_pos; i < data->text_len; i++) {
-                                data->text[i] = data->text[i + 1];
-                            }
-                            data->text_len--;
-                            
-                            // Call change handler
-                            if (data->on_change) {
-                                data->on_change(control);
-                            }
-                            
-                            // Redraw
-                            if (control->render) control->render(control);
-                        }
-                        break;
-                        
-                    case 0x4B: // Left arrow
-                        if (data->cursor_pos > 0) {
-                            data->cursor_pos--;
-                            if (control->render) control->render(control);
-                        }
-                        break;
-                        
-                    case 0x4D: // Right arrow
-                        if (data->cursor_pos < data->text_len) {
-                            data->cursor_pos++;
-                            if (control->render) control->render(control);
-                        }
-                        break;
-                        
-                    case 0x47: // Home
-                        data->cursor_pos = 0;
-                        if (control->render) control->render(control);
-                        break;
-                        
-                    case 0x4F: // End
-                        data->cursor_pos = data->text_len;
-                        if (control->render) control->render(control);
-                        break;
-                        
-                    default:
-                        // Regular character
-                        if (key >= 32 && key < 127 && data->text_len < data->max_len) {
-                            // Insert character at cursor
-                            for (int i = data->text_len; i > data->cursor_pos; i--) {
-                                data->text[i] = data->text[i - 1];
-                            }
-                            data->text[data->cursor_pos] = key;
-                            data->text_len++;
-                            data->cursor_pos++;
-                            
-                            // Call change handler
-                            if (data->on_change) {
-                                data->on_change(control);
-                            }
-                            
-                            // Redraw
-                            if (control->render) control->render(control);
-                        }
-                        break;
-                }
-            }
-            break;
-            
-        default:
-            break;
-    }
-}
-
-/**
- * Render textbox control
- */
-static void textbox_render(control_t* control) {
-    if (!control || !control->user_data || !control->parent) return;
-    
-    textbox_data_t* data = (textbox_data_t*)control->user_data;
-    framebuffer_t* fb = graphics_get_framebuffer();
-    
-    if (!fb || !data->text) return;
-    
-    // Skip if not visible
-    if (!(control->flags & CONTROL_FLAG_VISIBLE)) return;
-    
-    // Calculate absolute position
-    int abs_x = control->parent->x + control->parent->client_x + control->x;
-    int abs_y = control->parent->y + control->parent->client_y + control->y;
-    
-    // Draw textbox background
-    graphics_draw_rect(abs_x, abs_y, control->width, control->height, control->bg_color, 1);
-    
-    // Draw border
-    if (control->flags & CONTROL_FLAG_BORDER) {
-        uint32_t border_color = (control->flags & CONTROL_FLAG_FOCUSED) ? 
-                              CONTROL_COLOR_HIGHLIGHT : CONTROL_COLOR_BORDER;
-        graphics_draw_rect(abs_x, abs_y, control->width, control->height, border_color, 0);
-    }
-    
-    // Draw text
-    // TODO: Implement scrolling for long text
-    if (data->is_password) {
-        // Draw asterisks for password
-        char password_text[256];
-        int len = data->text_len;
-        if (len > 255) len = 255;
-        
-        for (int i = 0; i < len; i++) {
-            password_text[i] = '*';
-        }
-        password_text[len] = '\0';
-        
-        graphics_draw_string(abs_x + 4, abs_y + (control->height - 8) / 2, 
-                          password_text, control->fg_color, 1);
-    } else {
-        // Draw normal text
-        graphics_draw_string(abs_x + 4, abs_y + (control->height - 8) / 2, 
-                          data->text, control->fg_color, 1);
-    }
-    
-    // Draw cursor if focused
-    if (control->flags & CONTROL_FLAG_FOCUSED) {
-        // Calculate cursor position
-        // TODO: Implement more accurate cursor positioning based on text metrics
-        int cursor_x;
-        if (data->is_password) {
-            cursor_x = abs_x + 4 + data->cursor_pos * 8;
-        } else {
-            cursor_x = abs_x + 4 + data->cursor_pos * 8;
-        }
-        
-        int cursor_y1 = abs_y + 2;
-        int cursor_y2 = abs_y + control->height - 3;
-        
-        // Draw cursor line
-        graphics_draw_line(cursor_x, cursor_y1, cursor_x, cursor_y2, control->fg_color);
-    }
-}
-
-/**
- * Clean up textbox resources
- */
-static void textbox_destroy(control_t* control) {
-    if (!control) return;
-    
-    // Free textbox-specific data
-    textbox_data_t* data = (textbox_data_t*)control->user_data;
-    if (data) {
-        if (data->text) {
-            hal_memory_free(data->text);
-        }
-        hal_memory_free(data);
-    }
-    
-    control->user_data = NULL;
-}
-
-/**
- * Create a radio button control
- */
-control_t* radiobutton_create(int x, int y, int width, int height, const char* text, int group_id, int selected) {
-    // Allocate control structure
-    control_t* control = hal_memory_alloc(sizeof(control_t));
-    if (!control) {
-        LOG(LOG_ERROR, "Failed to allocate memory for radio button control");
-        return NULL;
-    }
-    
-    // Clear the control data
-    memset(control, 0, sizeof(control_t));
-    
-    // Set control properties
-    control->type = CONTROL_RADIOBUTTON;
-    control->x = x;
-    control->y = y;
-    control->width = width;
-    control->height = height;
-    control->bg_color = CONTROL_COLOR_BG;
-    control->fg_color = CONTROL_COLOR_FG;
-    control->flags = CONTROL_FLAG_VISIBLE | CONTROL_FLAG_ENABLED | CONTROL_FLAG_TABSTOP;
-    control->render = radiobutton_render;
-    control->handler = radiobutton_handle_event;
-    control->destroy = radiobutton_destroy;
-    
-    // Allocate radio button-specific data
-    radiobutton_data_t* data = hal_memory_alloc(sizeof(radiobutton_data_t));
-    if (!data) {
-        LOG(LOG_ERROR, "Failed to allocate memory for radio button data");
-        hal_memory_free(control);
-        return NULL;
-    }
-    
-    // Initialize radio button data
-    memset(data, 0, sizeof(radiobutton_data_t));
-    strncpy(data->text, text, sizeof(data->text) - 1);
-    data->group_id = group_id;
-    data->selected = selected;
-    
-    // Set user data to radio button data
-    control->user_data = data;
+    // Initialize checkbox state
+    control->state = 0; // unchecked
     
     return control;
 }
 
 /**
- * Get radio button state
+ * Create a custom control
  */
-int radiobutton_get_selected(control_t* radio) {
-    if (!radio || !radio->user_data) return 0;
+control_t* control_create_custom(
+    int x, int y, int width, int height,
+    uint32_t flags, 
+    void (*render_func)(control_t*, int, int),
+    void* user_data
+) {
+    control_t* control = control_create_basic(x, y, width, height, flags, CONTROL_TYPE_CUSTOM);
+    if (!control) return NULL;
     
-    radiobutton_data_t* data = (radiobutton_data_t*)radio->user_data;
-    return data->selected;
-}
-
-/**
- * Set radio button state and unselect others in the same group
- */
-void radiobutton_set_selected(control_t* radio, int selected) {
-    if (!radio || !radio->user_data || !radio->parent) return;
-    
-    radiobutton_data_t* data = (radiobutton_data_t*)radio->user_data;
-    if (data->selected != selected) {
-        // If selecting this radio button, deselect other radio buttons in the same group
-        if (selected) {
-            for (int i = 0; i < radio->parent->control_count; i++) {
-                control_t* other = radio->parent->controls[i];
-                if (other && other != radio && other->type == CONTROL_RADIOBUTTON) {
-                    radiobutton_data_t* other_data = (radiobutton_data_t*)other->user_data;
-                    if (other_data && other_data->group_id == data->group_id && other_data->selected) {
-                        other_data->selected = 0;
-                        if (other->render) other->render(other);
-                    }
-                }
-            }
-        }
-        
-        data->selected = selected;
-        
-        // Call select handler if available
-        if (data->on_select) {
-            data->on_select(radio);
-        }
-        
-        // Redraw the radio button
-        if (radio->render) {
-            radio->render(radio);
-        }
-    }
-}
-
-/**
- * Set radio button select handler
- */
-void radiobutton_set_select_handler(control_t* radio, void (*on_select)(control_t*)) {
-    if (!radio || !radio->user_data) return;
-    
-    radiobutton_data_t* data = (radiobutton_data_t*)radio->user_data;
-    data->on_select = on_select;
-}
-
-/**
- * Handle radio button events
- */
-static void radiobutton_handle_event(control_t* control, event_t* event, void* user_data) {
-    if (!control || !control->user_data || !event) return;
-    
-    // Handle only if enabled
-    if (!(control->flags & CONTROL_FLAG_ENABLED)) return;
-    
-    radiobutton_data_t* data = (radiobutton_data_t*)control->user_data;
-    
-    if (event->type == EVENT_MOUSE_UP && event->data.mouse.button == MOUSE_BUTTON_LEFT) {
-        // Radio buttons can only be selected, not deselected
-        if (!data->selected) {
-            radiobutton_set_selected(control, 1);
-        }
-    }
-}
-
-/**
- * Render radio button control
- */
-static void radiobutton_render(control_t* control) {
-    if (!control || !control->user_data || !control->parent) return;
-    
-    radiobutton_data_t* data = (radiobutton_data_t*)control->user_data;
-    framebuffer_t* fb = graphics_get_framebuffer();
-    
-    if (!fb) return;
-    
-    // Skip if not visible
-    if (!(control->flags & CONTROL_FLAG_VISIBLE)) return;
-    
-    // Calculate absolute position
-    int abs_x = control->parent->x + control->parent->client_x + control->x;
-    int abs_y = control->parent->y + control->parent->client_y + control->y;
-    
-    // Calculate radio circle size and position
-    int circle_radius = (control->height - 6) / 2;
-    if (circle_radius < 4) circle_radius = 4;
-    if (circle_radius > 8) circle_radius = 8;
-    
-    int circle_x = abs_x + circle_radius + 2;
-    int circle_y = abs_y + control->height / 2;
-    
-    // Draw radio circle
-    graphics_draw_circle(circle_x, circle_y, circle_radius, CONTROL_COLOR_BORDER, 0);
-    graphics_draw_circle(circle_x, circle_y, circle_radius - 1, COLOR_WHITE, 1);
-    
-    // Draw selection dot if selected
-    if (data->selected) {
-        graphics_draw_circle(circle_x, circle_y, circle_radius / 2, 
-                          control->flags & CONTROL_FLAG_ENABLED ? control->fg_color : CONTROL_COLOR_DISABLED, 
-                          1);
-    }
-    
-    // Draw text
-    int text_x = circle_x + circle_radius + 4;
-    int text_width = control->width - (text_x - abs_x);
-    draw_text_aligned(text_x, abs_y, text_width, control->height, 
-                    data->text, TEXT_ALIGN_LEFT, 
-                    control->flags & CONTROL_FLAG_ENABLED ? control->fg_color : CONTROL_COLOR_DISABLED);
-}
-
-/**
- * Clean up radio button resources
- */
-static void radiobutton_destroy(control_t* control) {
-    if (!control) return;
-    
-    // Free radio button-specific data
-    if (control->user_data) {
-        hal_memory_free(control->user_data);
-        control->user_data = NULL;
-    }
-}
-
-/**
- * Create a listbox control
- */
-control_t* listbox_create(int x, int y, int width, int height) {
-    // Allocate control structure
-    control_t* control = hal_memory_alloc(sizeof(control_t));
-    if (!control) {
-        LOG(LOG_ERROR, "Failed to allocate memory for listbox control");
-        return NULL;
-    }
-    
-    // Clear the control data
-    memset(control, 0, sizeof(control_t));
-    
-    // Set control properties
-    control->type = CONTROL_LISTBOX;
-    control->x = x;
-    control->y = y;
-    control->width = width;
-    control->height = height;
-    control->bg_color = COLOR_WHITE;
-    control->fg_color = CONTROL_COLOR_FG;
-    control->flags = CONTROL_FLAG_VISIBLE | CONTROL_FLAG_ENABLED | CONTROL_FLAG_TABSTOP | CONTROL_FLAG_BORDER;
-    control->render = listbox_render;
-    control->handler = listbox_handle_event;
-    control->destroy = listbox_destroy;
-    
-    // Allocate listbox-specific data
-    listbox_data_t* data = hal_memory_alloc(sizeof(listbox_data_t));
-    if (!data) {
-        LOG(LOG_ERROR, "Failed to allocate memory for listbox data");
-        hal_memory_free(control);
-        return NULL;
-    }
-    
-    // Initialize listbox data
-    memset(data, 0, sizeof(listbox_data_t));
-    data->selected_index = -1;
-    data->scroll_pos = 0;
-    data->item_height = 16; // Default item height
-    data->visible_items = (height - 4) / data->item_height;
-    
-    // Set user data to listbox data
-    control->user_data = data;
+    // Set custom render function and user data
+    control->render = render_func;
+    control->user_data = user_data;
     
     return control;
-}
-
-/**
- * Add an item to the listbox
- */
-int listbox_add_item(control_t* listbox, const char* text, void* item_data) {
-    if (!listbox || !listbox->user_data || !text) return -1;
-    
-    listbox_data_t* data = (listbox_data_t*)listbox->user_data;
-    
-    // Create new listbox item
-    listbox_item_t* item = hal_memory_alloc(sizeof(listbox_item_t));
-    if (!item) {
-        LOG(LOG_ERROR, "Failed to allocate memory for listbox item");
-        return -1;
-    }
-    
-    // Initialize item
-    memset(item, 0, sizeof(listbox_item_t));
-    strncpy(item->text, text, sizeof(item->text) - 1);
-    item->data = item_data;
-    item->next = NULL;
-    
-    // Add to the end of the list
-    if (data->items == NULL) {
-        // First item
-        data->items = item;
-    } else {
-        // Find the last item
-        listbox_item_t* last = data->items;
-        while (last->next != NULL) {
-            last = last->next;
-        }
-        
-        // Add to end
-        last->next = item;
-    }
-    
-    // Increment item count
-    data->item_count++;
-    
-    // Select first item if none selected
-    if (data->selected_index < 0 && data->item_count == 1) {
-        data->selected_index = 0;
-    }
-    
-    // Redraw the listbox
-    if (listbox->parent && listbox->render) {
-        listbox->render(listbox);
-    }
-    
-    return data->item_count - 1;
-}
-
-/**
- * Remove an item from the listbox
- */
-void listbox_remove_item(control_t* listbox, int index) {
-    if (!listbox || !listbox->user_data || index < 0) return;
-    
-    listbox_data_t* data = (listbox_data_t*)listbox->user_data;
-    
-    // Check if index is valid
-    if (index >= data->item_count) return;
-    
-    // Find the item to remove
-    listbox_item_t* item = data->items;
-    listbox_item_t* prev = NULL;
-    int current = 0;
-    
-    while (item && current < index) {
-        prev = item;
-        item = item->next;
-        current++;
-    }
-    
-    if (item) {
-        // Remove the item
-        if (prev) {
-            prev->next = item->next;
-        } else {
-            data->items = item->next;
-        }
-        
-        // Free the item
-        hal_memory_free(item);
-        
-        // Update item count
-        data->item_count--;
-        
-        // Update selected index
-        if (data->selected_index == index) {
-            // Selection was removed, select next item or none
-            if (data->item_count > 0) {
-                if (data->selected_index >= data->item_count) {
-                    data->selected_index = data->item_count - 1;
-                }
-            } else {
-                data->selected_index = -1;
-            }
-        } else if (data->selected_index > index) {
-            // Selection was after the removed item, decrement
-            data->selected_index--;
-        }
-        
-        // Update scroll position
-        if (data->scroll_pos > 0 && data->scroll_pos + data->visible_items > data->item_count) {
-            data->scroll_pos = data->item_count - data->visible_items;
-            if (data->scroll_pos < 0) data->scroll_pos = 0;
-        }
-        
-        // Redraw the listbox
-        if (listbox->parent && listbox->render) {
-            listbox->render(listbox);
-        }
-    }
-}
-
-/**
- * Clear all items from the listbox
- */
-void listbox_clear(control_t* listbox) {
-    if (!listbox || !listbox->user_data) return;
-    
-    listbox_data_t* data = (listbox_data_t*)listbox->user_data;
-    
-    // Free all items
-    listbox_item_t* item = data->items;
-    while (item) {
-        listbox_item_t* next = item->next;
-        hal_memory_free(item);
-        item = next;
-    }
-    
-    // Reset listbox data
-    data->items = NULL;
-    data->item_count = 0;
-    data->selected_index = -1;
-    data->scroll_pos = 0;
-    
-    // Redraw the listbox
-    if (listbox->parent && listbox->render) {
-        listbox->render(listbox);
-    }
-}
-
-/**
- * Get selected item index
- */
-int listbox_get_selected(control_t* listbox) {
-    if (!listbox || !listbox->user_data) return -1;
-    
-    listbox_data_t* data = (listbox_data_t*)listbox->user_data;
-    return data->selected_index;
-}
-
-/**
- * Set selected item index
- */
-void listbox_set_selected(control_t* listbox, int index) {
-    if (!listbox || !listbox->user_data) return;
-    
-    listbox_data_t* data = (listbox_data_t*)listbox->user_data;
-    
-    // Validate index
-    if (index < -1 || (index >= data->item_count && data->item_count > 0)) return;
-    
-    if (data->selected_index != index) {
-        data->selected_index = index;
-        
-        // Adjust scroll position to ensure the selected item is visible
-        if (index >= 0) {
-            if (index < data->scroll_pos) {
-                data->scroll_pos = index;
-            } else if (index >= data->scroll_pos + data->visible_items) {
-                data->scroll_pos = index - data->visible_items + 1;
-                if (data->scroll_pos < 0) data->scroll_pos = 0;
-            }
-        }
-        
-        // Call select handler if available
-        if (data->on_select) {
-            data->on_select(listbox, index);
-        }
-        
-        // Redraw the listbox
-        if (listbox->parent && listbox->render) {
-            listbox->render(listbox);
-        }
-    }
-}
-
-/**
- * Get item data for the specified index
- */
-void* listbox_get_item_data(control_t* listbox, int index) {
-    if (!listbox || !listbox->user_data || index < 0) return NULL;
-    
-    listbox_data_t* data = (listbox_data_t*)listbox->user_data;
-    
-    // Check if index is valid
-    if (index >= data->item_count) return NULL;
-    
-    // Find the item
-    listbox_item_t* item = data->items;
-    int current = 0;
-    
-    while (item && current < index) {
-        item = item->next;
-        current++;
-    }
-    
-    return item ? item->data : NULL;
-}
-
-/**
- * Set listbox select handler
- */
-void listbox_set_select_handler(control_t* listbox, void (*on_select)(control_t*, int)) {
-    if (!listbox || !listbox->user_data) return;
-    
-    listbox_data_t* data = (listbox_data_t*)listbox->user_data;
-    data->on_select = on_select;
-}
-
-/**
- * Handle listbox events
- */
-static void listbox_handle_event(control_t* control, event_t* event, void* user_data) {
-    if (!control || !control->user_data || !event) return;
-    
-    // Handle only if enabled
-    if (!(control->flags & CONTROL_FLAG_ENABLED)) return;
-    
-    listbox_data_t* data = (listbox_data_t*)control->user_data;
-    
-    switch (event->type) {
-        case EVENT_MOUSE_DOWN:
-            if (event->data.mouse.button == MOUSE_BUTTON_LEFT) {
-                // Set focus to this control
-                if (control->parent) {
-                    for (int i = 0; i < control->parent->control_count; i++) {
-                        control_t* other = control->parent->controls[i];
-                        if (other && other != control && (other->flags & CONTROL_FLAG_FOCUSED)) {
-                            other->flags &= ~CONTROL_FLAG_FOCUSED;
-                            if (other->render) other->render(other);
-                        }
-                    }
-                }
-                
-                control->flags |= CONTROL_FLAG_FOCUSED;
-                
-                // Calculate which item was clicked
-                int y = event->data.mouse.y;
-                int index = data->scroll_pos + (y - 2) / data->item_height;
-                
-                // Select the clicked item
-                if (index >= 0 && index < data->item_count) {
-                    listbox_set_selected(control, index);
-                }
-            }
-            break;
-            
-        case EVENT_KEY_DOWN:
-            if (control->flags & CONTROL_FLAG_FOCUSED) {
-                int scancode = event->data.key.scancode;
-                
-                switch (scancode) {
-                    case 0x48: // Up arrow
-                        if (data->selected_index > 0) {
-                            listbox_set_selected(control, data->selected_index - 1);
-                        }
-                        break;
-                        
-                    case 0x50: // Down arrow
-                        if (data->selected_index < data->item_count - 1) {
-                            listbox_set_selected(control, data->selected_index + 1);
-                        }
-                        break;
-                        
-                    case 0x49: // Page up
-                        if (data->selected_index > 0) {
-                            int new_index = data->selected_index - data->visible_items;
-                            if (new_index < 0) new_index = 0;
-                            listbox_set_selected(control, new_index);
-                        }
-                        break;
-                        
-                    case 0x51: // Page down
-                        if (data->selected_index < data->item_count - 1) {
-                            int new_index = data->selected_index + data->visible_items;
-                            if (new_index >= data->item_count) new_index = data->item_count - 1;
-                            listbox_set_selected(control, new_index);
-                        }
-                        break;
-                        
-                    case 0x47: // Home
-                        if (data->item_count > 0) {
-                            listbox_set_selected(control, 0);
-                        }
-                        break;
-                        
-                    case 0x4F: // End
-                        if (data->item_count > 0) {
-                            listbox_set_selected(control, data->item_count - 1);
-                        }
-                        break;
-                }
-            }
-            break;
-            
-        default:
-            break;
-    }
-}
-
-/**
- * Render listbox control
- */
-static void listbox_render(control_t* control) {
-    if (!control || !control->user_data || !control->parent) return;
-    
-    listbox_data_t* data = (listbox_data_t*)control->user_data;
-    framebuffer_t* fb = graphics_get_framebuffer();
-    
-    if (!fb) return;
-    
-    // Skip if not visible
-    if (!(control->flags & CONTROL_FLAG_VISIBLE)) return;
-    
-    // Calculate absolute position
-    int abs_x = control->parent->x + control->parent->client_x + control->x;
-    int abs_y = control->parent->y + control->parent->client_y + control->y;
-    
-    // Draw listbox background
-    graphics_draw_rect(abs_x, abs_y, control->width, control->height, control->bg_color, 1);
-    
-    // Draw border
-    if (control->flags & CONTROL_FLAG_BORDER) {
-        uint32_t border_color = (control->flags & CONTROL_FLAG_FOCUSED) ? 
-                              CONTROL_COLOR_HIGHLIGHT : CONTROL_COLOR_BORDER;
-        graphics_draw_rect(abs_x, abs_y, control->width, control->height, border_color, 0);
-    }
-    
-    // Draw items
-    int y = abs_y + 2; // Start 2 pixels from top
-    listbox_item_t* item = data->items;
-    int index = 0;
-    
-    // Skip items before scroll position
-    while (item && index < data->scroll_pos) {
-        item = item->next;
-        index++;
-    }
-    
-    // Draw visible items
-    while (item && y < abs_y + control->height - 2) {
-        // Determine item background color
-        uint32_t bg_color = control->bg_color;
-        uint32_t text_color = control->fg_color;
-        
-        // Highlight selected item
-        if (index == data->selected_index) {
-            bg_color = CONTROL_COLOR_HIGHLIGHT;
-            text_color = COLOR_WHITE;
-        }
-        
-        // Draw item background
-        graphics_draw_rect(abs_x + 2, y, control->width - 4, data->item_height, bg_color, 1);
-        
-        // Draw item text
-        graphics_draw_string(abs_x + 4, y + (data->item_height - 8) / 2, item->text, text_color, 1);
-        
-        // Move to next item
-        y += data->item_height;
-        item = item->next;
-        index++;
-    }
-    
-    // Draw a simple scrollbar if needed
-    if (data->item_count > data->visible_items) {
-        int scrollbar_width = 8;
-        int scrollbar_x = abs_x + control->width - scrollbar_width - 2;
-        int scrollbar_y = abs_y + 2;
-        int scrollbar_height = control->height - 4;
-        
-        // Draw scrollbar background
-        graphics_draw_rect(scrollbar_x, scrollbar_y, scrollbar_width, scrollbar_height, CONTROL_COLOR_BG, 1);
-        
-        // Calculate thumb position and size
-        int thumb_height = scrollbar_height * data->visible_items / data->item_count;
-        if (thumb_height < 8) thumb_height = 8;
-        
-        int thumb_y = scrollbar_y + (scrollbar_height - thumb_height) * data->scroll_pos / 
-                     (data->item_count - data->visible_items);
-        
-        // Draw thumb
-        graphics_draw_rect(scrollbar_x, thumb_y, scrollbar_width, thumb_height, CONTROL_COLOR_BORDER, 1);
-    }
-}
-
-/**
- * Clean up listbox resources
- */
-static void listbox_destroy(control_t* control) {
-    if (!control) return;
-    
-    // Free listbox-specific data
-    listbox_data_t* data = (listbox_data_t*)control->user_data;
-    if (data) {
-        // Free all items
-        listbox_item_t* item = data->items;
-        while (item) {
-            listbox_item_t* next = item->next;
-            hal_memory_free(item);
-            item = next;
-        }
-        
-        hal_memory_free(data);
-    }
-    
-    control->user_data = NULL;
 }
 
 /**
  * Create a progress bar control
  */
-control_t* progressbar_create(int x, int y, int width, int height, int min, int max) {
-    // Allocate control structure
-    control_t* control = hal_memory_alloc(sizeof(control_t));
-    if (!control) {
-        LOG(LOG_ERROR, "Failed to allocate memory for progress bar control");
-        return NULL;
-    }
-    
-    // Clear the control data
-    memset(control, 0, sizeof(control_t));
-    
-    // Set control properties
-    control->type = CONTROL_PROGRESSBAR;
-    control->x = x;
-    control->y = y;
-    control->width = width;
-    control->height = height;
-    control->bg_color = CONTROL_COLOR_BG;
-    control->fg_color = CONTROL_COLOR_HIGHLIGHT;
-    control->flags = CONTROL_FLAG_VISIBLE | CONTROL_FLAG_ENABLED | CONTROL_FLAG_BORDER;
-    control->render = progressbar_render;
-    control->destroy = progressbar_destroy;
-    
-    // Allocate progress bar-specific data
-    progressbar_data_t* data = hal_memory_alloc(sizeof(progressbar_data_t));
-    if (!data) {
-        LOG(LOG_ERROR, "Failed to allocate memory for progress bar data");
-        hal_memory_free(control);
-        return NULL;
-    }
+control_t* control_create_progress_bar(
+    int x, int y, int width, int height,
+    int min_value, int max_value, int current_value,
+    uint32_t bar_color, uint32_t flags
+) {
+    control_t* control = control_create_basic(x, y, width, height, flags, CONTROL_TYPE_PROGRESS_BAR);
+    if (!control) return NULL;
     
     // Initialize progress bar data
-    memset(data, 0, sizeof(progressbar_data_t));
-    data->min = min;
-    data->max = (max > min) ? max : min + 1; // Ensure max > min
-    data->value = min;
-    
-    // Set user data to progress bar data
-    control->user_data = data;
+    control->data.progress.min_value = min_value;
+    control->data.progress.max_value = max_value;
+    control->data.progress.current_value = current_value;
+    control->data.progress.bar_color = bar_color;
     
     return control;
 }
 
 /**
- * Set progress bar range
+ * Create a list box control
  */
-void progressbar_set_range(control_t* progressbar, int min, int max) {
-    if (!progressbar || !progressbar->user_data) return;
+control_t* control_create_list_box(
+    int x, int y, int width, int height,
+    uint32_t flags
+) {
+    control_t* control = control_create_basic(
+        x, y, width, height,
+        flags | CONTROL_FLAG_CAN_FOCUS,
+        CONTROL_TYPE_LIST_BOX
+    );
+    if (!control) return NULL;
     
-    progressbar_data_t* data = (progressbar_data_t*)progressbar->user_data;
+    // Initialize list box data
+    control->data.list.count = 0;
+    control->data.list.selected_index = -1;
+    control->data.list.scroll_offset = 0;
+    control->data.list.on_selection_change = NULL;
     
-    // Validate range
-    if (min >= max) return;
+    return control;
+}
+
+/**
+ * Create a dropdown control
+ */
+control_t* control_create_dropdown(
+    int x, int y, int width, int height,
+    const char* default_text,
+    uint32_t flags
+) {
+    control_t* control = control_create_basic(
+        x, y, width, height,
+        flags | CONTROL_FLAG_CAN_FOCUS,
+        CONTROL_TYPE_DROPDOWN
+    );
+    if (!control) return NULL;
     
-    data->min = min;
-    data->max = max;
+    // Initialize dropdown data
+    control->data.list.count = 0;
+    control->data.list.selected_index = -1;
+    control->data.list.scroll_offset = 0;
+    control->data.list.on_selection_change = NULL;
     
-    // Adjust current value if needed
-    if (data->value < min) data->value = min;
-    if (data->value > max) data->value = max;
+    // Set default text
+    strncpy(control->text, default_text, CONTROL_TEXT_MAX_LENGTH - 1);
+    control->text[CONTROL_TEXT_MAX_LENGTH - 1] = '\0';
     
-    // Redraw the progress bar
-    if (progressbar->parent && progressbar->render) {
-        progressbar->render(progressbar);
-    }
+    // Dropdowns start in closed state
+    control->state = 0; // 0 = closed, 1 = open
+    
+    return control;
 }
 
 /**
  * Set progress bar value
  */
-void progressbar_set_value(control_t* progressbar, int value) {
-    if (!progressbar || !progressbar->user_data) return;
+void control_progress_bar_set_value(control_t* control, int value) {
+    if (!control || control->type != CONTROL_TYPE_PROGRESS_BAR) return;
     
-    progressbar_data_t* data = (progressbar_data_t*)progressbar->user_data;
+    // Clamp the value to the progress bar range
+    if (value < control->data.progress.min_value) {
+        control->data.progress.current_value = control->data.progress.min_value;
+    } else if (value > control->data.progress.max_value) {
+        control->data.progress.current_value = control->data.progress.max_value;
+    } else {
+        control->data.progress.current_value = value;
+    }
+}
+
+/**
+ * Set control click handler
+ */
+void control_set_click_handler(control_t* control, void (*handler)(control_t*)) {
+    if (!control) return;
+    control->on_click = handler;
+}
+
+/**
+ * Set control key handler
+ */
+void control_set_key_handler(control_t* control, void (*handler)(control_t*, int, int, int)) {
+    if (!control) return;
+    control->on_key = handler;
+}
+
+/**
+ * Handle mouse events for a control
+ */
+void control_handle_mouse(control_t* control, int x, int y, int button, int press) {
+    if (!control || !(control->flags & CONTROL_FLAG_ENABLED)) return;
     
-    // Clamp value to range
-    if (value < data->min) value = data->min;
-    if (value > data->max) value = data->max;
-    
-    if (data->value != value) {
-        data->value = value;
+    // Handle button press
+    if (press && button) {
+        // Focus the control if it can receive focus
+        if (control->flags & CONTROL_FLAG_CAN_FOCUS) {
+            focused_control = control;
+        }
         
-        // Redraw the progress bar
-        if (progressbar->parent && progressbar->render) {
-            progressbar->render(progressbar);
+        // Set the control as pressed
+        control->pressed = 1;
+        
+        // Handle based on control type
+        switch (control->type) {
+            case CONTROL_TYPE_BUTTON:
+                // Buttons trigger on release, so just mark as pressed
+                break;
+                
+            case CONTROL_TYPE_CHECKBOX:
+                // Toggle checkbox state
+                control->state = !control->state;
+                if (control->on_click) {
+                    control->on_click(control);
+                }
+                break;
+                
+            case CONTROL_TYPE_TEXTBOX:
+                // Handle textbox click (move cursor)
+                if (x >= 0 && x < control->width) {
+                    // Calculate cursor position based on click position
+                    // Simplistic implementation - assumes fixed width font
+                    int char_width = 8; // assuming 8 pixels per character
+                    int click_pos = x / char_width;
+                    
+                    // Clamp to text length
+                    if (click_pos > strlen(control->text)) {
+                        click_pos = strlen(control->text);
+                    }
+                    
+                    control->cursor_pos = click_pos;
+                }
+                break;
+                
+            case CONTROL_TYPE_LIST_BOX:
+                {
+                    list_box_data_t* list = &control->data.list;
+                    
+                    // Calculate if click is in the scrollbar area
+                    int item_height = 16; // Fixed item height
+                    int visible_items = control->height / item_height;
+                    int draw_scrollbar = list->count > visible_items;
+                    int scrollbar_width = 12;
+                    
+                    // Check if click is on the scrollbar
+                    if (draw_scrollbar && x > control->width - scrollbar_width) {
+                        // Handle scrollbar click
+                        int max_scroll = list->count - visible_items;
+                        if (max_scroll <= 0) max_scroll = 1;
+                        
+                        // Calculate relative position in scrollbar
+                        int scroll_pos = (y * max_scroll) / control->height;
+                        if (scroll_pos < 0) scroll_pos = 0;
+                        if (scroll_pos > max_scroll) scroll_pos = max_scroll;
+                        
+                        // Update scroll offset
+                        list->scroll_offset = scroll_pos;
+                    } 
+                    else if (list->count > 0) {
+                        // Calculate which item was clicked
+                        int item_index = list->scroll_offset + (y / item_height);
+                        
+                        // Make sure it's a valid index
+                        if (item_index >= 0 && item_index < list->count) {
+                            // Update selected index
+                            int old_selection = list->selected_index;
+                            list->selected_index = item_index;
+                            
+                            // Call selection handler if defined and selection changed
+                            if (list->on_selection_change && old_selection != item_index) {
+                                list->on_selection_change(control, item_index);
+                            }
+                            
+                            // Trigger click handler
+                            if (control->on_click) {
+                                control->on_click(control);
+                            }
+                        }
+                    }
+                }
+                break;
+                
+            case CONTROL_TYPE_DROPDOWN:
+                {
+                    // Check if dropdown is open
+                    if (control->state) {
+                        // If click is outside the dropdown area, close it
+                        if (y < 0 || y >= control->height) {
+                            // Calculate dropdown height
+                            list_box_data_t* list = &control->data.list;
+                            int item_height = 16;
+                            int dropdown_height = list->count * item_height + 2;
+                            if (dropdown_height > 200) dropdown_height = 200; // max height
+                            
+                            // Check if click is within the dropdown list
+                            if (y >= control->height && y < control->height + dropdown_height && x >= 0 && x < control->width) {
+                                // Calculate which item was clicked
+                                int item_index = (y - control->height) / item_height;
+                                
+                                // Make sure it's a valid index
+                                if (item_index >= 0 && item_index < list->count) {
+                                    // Update selected index
+                                    int old_selection = list->selected_index;
+                                    list->selected_index = item_index;
+                                    
+                                    // Update display text
+                                    strncpy(control->text, list->items[item_index].text, CONTROL_TEXT_MAX_LENGTH - 1);
+                                    control->text[CONTROL_TEXT_MAX_LENGTH - 1] = '\0';
+                                    
+                                    // Call selection handler if defined and selection changed
+                                    if (list->on_selection_change && old_selection != item_index) {
+                                        list->on_selection_change(control, item_index);
+                                    }
+                                }
+                            }
+                            
+                            // Close dropdown regardless of where clicked
+                            control->state = 0;
+                            
+                            // Trigger click handler
+                            if (control->on_click) {
+                                control->on_click(control);
+                            }
+                        }
+                    } 
+                    else {
+                        // Open the dropdown
+                        control->state = 1;
+                    }
+                }
+                break;
+                
+            case CONTROL_TYPE_CUSTOM:
+                // Call the click handler if defined
+                if (control->on_click) {
+                    control->on_click(control);
+                }
+                break;
+                
+            default:
+                break;
+        }
+    }
+    // Handle button release
+    else if (!press && control->pressed) {
+        control->pressed = 0;
+        
+        // Handle based on control type
+        switch (control->type) {
+            case CONTROL_TYPE_BUTTON:
+                // Trigger the click handler for buttons on release
+                if (control->on_click) {
+                    control->on_click(control);
+                }
+                break;
+                
+            default:
+                break;
         }
     }
 }
 
 /**
- * Get progress bar value
+ * Handle keyboard events for a control
  */
-int progressbar_get_value(control_t* progressbar) {
-    if (!progressbar || !progressbar->user_data) return 0;
-    
-    progressbar_data_t* data = (progressbar_data_t*)progressbar->user_data;
-    return data->value;
-}
-
-/**
- * Render progress bar control
- */
-static void progressbar_render(control_t* control) {
-    if (!control || !control->user_data || !control->parent) return;
-    
-    progressbar_data_t* data = (progressbar_data_t*)control->user_data;
-    framebuffer_t* fb = graphics_get_framebuffer();
-    
-    if (!fb) return;
-    
-    // Skip if not visible
-    if (!(control->flags & CONTROL_FLAG_VISIBLE)) return;
-    
-    // Calculate absolute position
-    int abs_x = control->parent->x + control->parent->client_x + control->x;
-    int abs_y = control->parent->y + control->parent->client_y + control->y;
-    
-    // Draw progress bar background
-    graphics_draw_rect(abs_x, abs_y, control->width, control->height, control->bg_color, 1);
-    
-    // Draw border
-    if (control->flags & CONTROL_FLAG_BORDER) {
-        graphics_draw_rect(abs_x, abs_y, control->width, control->height, CONTROL_COLOR_BORDER, 0);
+void control_handle_key(control_t* control, int key, int scancode, int press) {
+    if (!control || !(control->flags & CONTROL_FLAG_ENABLED) || 
+        !(control->flags & CONTROL_FLAG_CAN_FOCUS) || 
+        control != focused_control) {
+        return;
     }
     
-    // Calculate filled portion
-    int range = data->max - data->min;
-    int value = data->value - data->min;
-    int filled_width = 0;
+    // Only process key press events for now
+    if (!press) return;
     
-    if (range > 0 && value > 0) {
-        filled_width = (control->width - 4) * value / range;
-    }
-    
-    // Draw filled portion
-    if (filled_width > 0) {
-        graphics_draw_rect(abs_x + 2, abs_y + 2, filled_width, control->height - 4, control->fg_color, 1);
-    }
-}
-
-/**
- * Clean up progress bar resources
- */
-static void progressbar_destroy(control_t* control) {
-    if (!control) return;
-    
-    // Free progress bar-specific data
-    if (control->user_data) {
-        hal_memory_free(control->user_data);
-        control->user_data = NULL;
-    }
-}
-
-/* Helper function implementations */
-
-/**
- * Draw a 3D effect rectangle
- */
-static void draw_3d_rect(control_t* control, int x, int y, int width, int height, int raised) {
-    uint32_t light_color = COLOR_WHITE;
-    uint32_t dark_color = COLOR_DARK_GRAY;
-    
-    if (raised) {
-        // Draw light edges (top, left)
-        graphics_draw_line(x, y, x + width - 1, y, light_color);
-        graphics_draw_line(x, y, x, y + height - 1, light_color);
-        
-        // Draw dark edges (bottom, right)
-        graphics_draw_line(x, y + height - 1, x + width - 1, y + height - 1, dark_color);
-        graphics_draw_line(x + width - 1, y, x + width - 1, y + height - 1, dark_color);
-    } else {
-        // Draw dark edges (top, left)
-        graphics_draw_line(x, y, x + width - 1, y, dark_color);
-        graphics_draw_line(x, y, x, y + height - 1, dark_color);
-        
-        // Draw light edges (bottom, right)
-        graphics_draw_line(x, y + height - 1, x + width - 1, y + height - 1, light_color);
-        graphics_draw_line(x + width - 1, y, x + width - 1, y + height - 1, light_color);
-    }
-}
-
-/**
- * Draw text with the specified alignment
- */
-static void draw_text_aligned(int x, int y, int width, int height, const char* text, text_align_t align, uint32_t color) {
-    if (!text) return;
-    
-    int text_len = strlen(text);
-    int text_width = text_len * 8; // Assuming fixed-width font, 8 pixels per character
-    int text_x;
-    
-    switch (align) {
-        case TEXT_ALIGN_LEFT:
-            text_x = x;
-            break;
+    // Handle based on control type
+    switch (control->type) {
+        case CONTROL_TYPE_TEXTBOX:
+            // Check for clipboard shortcuts (Ctrl+X, Ctrl+C, Ctrl+V)
+            if (key == 'x' - 96 || key == 'X' - 64) {  // Ctrl+X (Cut)
+                // Get the text from the control
+                const char* text = control->text;
+                uint32_t text_len = strlen(text);
+                
+                // Copy to clipboard
+                clipboard_set_text(text, text_len);
+                
+                // Clear the text
+                control->text[0] = '\0';
+                control->cursor_pos = 0;
+                
+                return;
+            }
+            else if (key == 'c' - 96 || key == 'C' - 64) {  // Ctrl+C (Copy)
+                // Get the text from the control
+                const char* text = control->text;
+                uint32_t text_len = strlen(text);
+                
+                // Copy to clipboard
+                clipboard_set_text(text, text_len);
+                
+                return;
+            }
+            else if (key == 'v' - 96 || key == 'V' - 64) {  // Ctrl+V (Paste)
+                // Get text from clipboard
+                const char* clipboard_text = clipboard_get_text();
+                if (!clipboard_text) {
+                    return; // Nothing to paste
+                }
+                
+                uint32_t clipboard_len = clipboard_get_text_length();
+                uint32_t current_len = strlen(control->text);
+                
+                // Check if there's enough room
+                if (current_len + clipboard_len >= CONTROL_TEXT_MAX_LENGTH - 1) {
+                    // Not enough room, truncate the clipboard text
+                    clipboard_len = CONTROL_TEXT_MAX_LENGTH - 1 - current_len;
+                }
+                
+                if (clipboard_len > 0) {
+                    // Make space at cursor position
+                    memmove(
+                        &control->text[control->cursor_pos + clipboard_len],
+                        &control->text[control->cursor_pos],
+                        current_len - control->cursor_pos + 1
+                    );
+                    
+                    // Insert the clipboard text
+                    memcpy(
+                        &control->text[control->cursor_pos],
+                        clipboard_text,
+                        clipboard_len
+                    );
+                    
+                    // Update cursor position
+                    control->cursor_pos += clipboard_len;
+                }
+                
+                return;
+            }
             
-        case TEXT_ALIGN_CENTER:
-            text_x = x + (width - text_width) / 2;
-            break;
-            
-        case TEXT_ALIGN_RIGHT:
-            text_x = x + width - text_width;
+            // Handle regular textbox input
+            if (key >= 32 && key <= 126) { // Printable ASCII
+                // Check if there's room in the buffer
+                if (strlen(control->text) < CONTROL_TEXT_MAX_LENGTH - 1) {
+                    // Make space by shifting text right from cursor position
+                    memmove(
+                        &control->text[control->cursor_pos + 1],
+                        &control->text[control->cursor_pos],
+                        strlen(&control->text[control->cursor_pos]) + 1
+                    );
+                    
+                    // Insert the character
+                    control->text[control->cursor_pos] = key;
+                    control->cursor_pos++;
+                }
+            }
+            else if (key == 8) { // Backspace
+                // If there's a character before the cursor
+                if (control->cursor_pos > 0) {
+                    // Remove the character by shifting text left
+                    memmove(
+                        &control->text[control->cursor_pos - 1],
+                        &control->text[control->cursor_pos],
+                        strlen(&control->text[control->cursor_pos]) + 1
+                    );
+                    
+                    control->cursor_pos--;
+                }
+            }
+            else if (key == 127) { // Delete
+                // If there's a character at/after the cursor
+                if (control->cursor_pos < strlen(control->text)) {
+                    // Remove the character by shifting text left
+                    memmove(
+                        &control->text[control->cursor_pos],
+                        &control->text[control->cursor_pos + 1],
+                        strlen(&control->text[control->cursor_pos + 1]) + 1
+                    );
+                }
+            }
+            else if (key == 0x1B) { // Escape - unfocus
+                focused_control = NULL;
+            }
+            else if (key == 0x0D) { // Enter - trigger event
+                if (control->on_key) {
+                    control->on_key(control, key, scancode, press);
+                }
+            }
+            else if (key == 0x25) { // Left Arrow
+                if (control->cursor_pos > 0) {
+                    control->cursor_pos--;
+                }
+            }
+            else if (key == 0x27) { // Right Arrow
+                if (control->cursor_pos < strlen(control->text)) {
+                    control->cursor_pos++;
+                }
+            }
+            else if (key == 0x24) { // Home
+                control->cursor_pos = 0;
+            }
+            else if (key == 0x23) { // End
+                control->cursor_pos = strlen(control->text);
+            }
             break;
             
         default:
-            text_x = x;
+            // Call the key handler if defined
+            if (control->on_key) {
+                control->on_key(control, key, scancode, press);
+            }
             break;
     }
+}
+
+/**
+ * Render a control at the specified position
+ */
+void control_render(control_t* control, int x, int y) {
+    if (!control || !(control->flags & CONTROL_FLAG_VISIBLE)) return;
     
-    // Center vertically
-    int text_y = y + (height - 8) / 2; // Assuming 8 pixel character height
+    // Get theme colors from window manager
+    extern uint32_t window_bg_color;
+    extern uint32_t control_bg_color;
+    extern uint32_t control_text_color;
+    extern uint32_t control_border_color;
     
-    // Clip text if it exceeds the width
-    int max_chars = (x + width - text_x) / 8;
-    if (max_chars < text_len) {
-        // TODO: Implement better text truncation with ellipsis
-        graphics_draw_string(text_x, text_y, text, color, 1);
-    } else {
-        graphics_draw_string(text_x, text_y, text, color, 1);
+    // Use a custom render function if provided
+    if (control->render) {
+        control->render(control, x, y);
+        return;
     }
+    
+    // Default rendering based on control type
+    switch (control->type) {
+        case CONTROL_TYPE_LABEL:
+            // Labels just draw text
+            graphics_draw_string(
+                x + 2, y + (control->height - 8) / 2, // Center text vertically
+                control->text,
+                control->flags & CONTROL_FLAG_ENABLED ? control_text_color : 0x808080,
+                1  // Scale
+            );
+            break;
+            
+        case CONTROL_TYPE_PROGRESS_BAR:
+            {
+                progress_bar_data_t* progress = &control->data.progress;
+                
+                // Calculate the progress percentage
+                int range = progress->max_value - progress->min_value;
+                int current = progress->current_value - progress->min_value;
+                int fill_width = 0;
+                
+                if (range > 0) {
+                    fill_width = (current * (control->width - 4)) / range;
+                    if (fill_width < 0) fill_width = 0;
+                    if (fill_width > control->width - 4) fill_width = control->width - 4;
+                }
+                
+                // Draw progress bar background
+                graphics_draw_rect(
+                    x, y, control->width, control->height,
+                    control_bg_color,
+                    1  // Filled
+                );
+                
+                // Draw progress bar border
+                graphics_draw_rect(
+                    x, y, control->width, control->height,
+                    control_border_color,
+                    0  // Not filled
+                );
+                
+                // Draw progress bar fill
+                if (fill_width > 0) {
+                    graphics_draw_rect(
+                        x + 2, y + 2,
+                        fill_width, control->height - 4,
+                        progress->bar_color,
+                        1  // Filled
+                    );
+                }
+                
+                // Draw percentage text if there's space
+                if (control->width >= 40) {
+                    char percent_text[8];
+                    int percent = range > 0 ? (current * 100) / range : 0;
+                    sprintf(percent_text, "%d%%", percent);
+                    
+                    graphics_draw_string(
+                        x + (control->width - strlen(percent_text) * 8) / 2,
+                        y + (control->height - 8) / 2,
+                        percent_text,
+                        0xFFFFFF,
+                        1  // Scale
+                    );
+                }
+            }
+            break;
+            
+        case CONTROL_TYPE_BUTTON:
+            {
+                // Draw button background with 3D effect
+                uint32_t top_color = control->pressed ? 0x808080 : 0xFFFFFF;
+                uint32_t bottom_color = control->pressed ? 0xFFFFFF : 0x808080;
+                
+                // Button background
+                graphics_draw_rect(
+                    x, y, control->width, control->height,
+                    control_bg_color,
+                    1  // Filled
+                );
+                
+                // Button border (3D effect)
+                graphics_draw_line(x, y, x + control->width - 1, y, top_color); // Top
+                graphics_draw_line(x, y, x, y + control->height - 1, top_color); // Left
+                graphics_draw_line(x, y + control->height - 1, x + control->width - 1, y + control->height - 1, bottom_color); // Bottom
+                graphics_draw_line(x + control->width - 1, y, x + control->width - 1, y + control->height - 1, bottom_color); // Right
+                
+                // Button text (shifted if pressed)
+                int text_x = x + (control->width - strlen(control->text) * 8) / 2; // Center text horizontally
+                int text_y = y + (control->height - 8) / 2; // Center text vertically
+                
+                if (control->pressed) {
+                    text_x += 1;
+                    text_y += 1;
+                }
+                
+                graphics_draw_string(
+                    text_x, text_y,
+                    control->text,
+                    control->flags & CONTROL_FLAG_ENABLED ? control_text_color : 0x808080,
+                    1  // Scale
+                );
+            }
+            break;
+            
+        case CONTROL_TYPE_CHECKBOX:
+            {
+                // Draw checkbox box
+                int box_size = control->height - 4;
+                if (box_size > 16) box_size = 16;
+                
+                graphics_draw_rect(
+                    x + 2, y + (control->height - box_size) / 2,
+                    box_size, box_size,
+                    control_border_color,
+                    0  // Not filled
+                );
+                
+                // Draw checkbox background
+                graphics_draw_rect(
+                    x + 3, y + (control->height - box_size) / 2 + 1,
+                    box_size - 2, box_size - 2,
+                    control->flags & CONTROL_FLAG_ENABLED ? 0xFFFFFF : 0xE0E0E0,
+                    1  // Filled
+                );
+                
+                // Draw check mark if checked
+                if (control->state) {
+                    int check_x = x + 3;
+                    int check_y = y + (control->height - box_size) / 2 + 1;
+                    
+                    graphics_draw_line(
+                        check_x + 2, check_y + box_size / 2,
+                        check_x + box_size / 2, check_y + box_size - 4,
+                        control_text_color
+                    );
+                    graphics_draw_line(
+                        check_x + box_size / 2, check_y + box_size - 4,
+                        check_x + box_size - 3, check_y + 2,
+                        control_text_color
+                    );
+                }
+                
+                // Draw checkbox text
+                graphics_draw_string(
+                    x + box_size + 6, y + (control->height - 8) / 2,
+                    control->text,
+                    control->flags & CONTROL_FLAG_ENABLED ? control_text_color : 0x808080,
+                    1  // Scale
+                );
+            }
+            break;
+            
+        case CONTROL_TYPE_TEXTBOX:
+            {
+                // Draw textbox background
+                graphics_draw_rect(
+                    x, y, control->width, control->height,
+                    control->flags & CONTROL_FLAG_ENABLED ? 0xFFFFFF : 0xE0E0E0,
+                    1  // Filled
+                );
+                
+                // Draw textbox border
+                graphics_draw_rect(
+                    x, y, control->width, control->height,
+                    control_border_color,
+                    0  // Not filled
+                );
+                
+                // Draw text
+                graphics_draw_string(
+                    x + 3, y + (control->height - 8) / 2,
+                    control->text,
+                    control->flags & CONTROL_FLAG_ENABLED ? control_text_color : 0x808080,
+                    1  // Scale
+                );
+                
+                // Draw cursor if focused
+                if (control == focused_control && (control->flags & CONTROL_FLAG_ENABLED)) {
+                    int cursor_x = x + 3 + control->cursor_pos * 8;
+                    int cursor_y = y + (control->height - 10) / 2;
+                    
+                    // Flash the cursor (very basic implementation)
+                    static int cursor_flash = 0;
+                    cursor_flash = (cursor_flash + 1) % 20;
+                    
+                    if (cursor_flash < 10) {
+                        graphics_draw_line(
+                            cursor_x, cursor_y,
+                            cursor_x, cursor_y + 10,
+                            control_text_color
+                        );
+                    }
+                }
+            }
+            break;
+            
+        case CONTROL_TYPE_CUSTOM:
+            // Custom controls should have their own render function
+            // Here we just draw a placeholder
+            graphics_draw_rect(
+                x, y, control->width, control->height,
+                control_bg_color,
+                1  // Filled
+            );
+            graphics_draw_rect(
+                x, y, control->width, control->height,
+                control_border_color,
+                0  // Not filled
+            );
+            break;
+            
+        case CONTROL_TYPE_LIST_BOX:
+            {
+                list_box_data_t* list = &control->data.list;
+                
+                // Draw list box background
+                graphics_draw_rect(
+                    x, y, control->width, control->height,
+                    control->flags & CONTROL_FLAG_ENABLED ? 0xFFFFFF : 0xE0E0E0,
+                    1  // Filled
+                );
+                
+                // Draw list box border
+                graphics_draw_rect(
+                    x, y, control->width, control->height,
+                    control_border_color,
+                    0  // Not filled
+                );
+                
+                // Calculate how many items can fit in the visible area
+                int item_height = 16; // Fixed item height
+                int visible_items = control->height / item_height;
+                if (visible_items <= 0) visible_items = 1;
+                
+                // Calculate scrollbar position if needed
+                int draw_scrollbar = list->count > visible_items;
+                int scrollbar_width = 12;
+                int item_area_width = control->width - (draw_scrollbar ? scrollbar_width : 0);
+                
+                // Make sure scroll offset is within bounds
+                if (list->scroll_offset > list->count - visible_items)
+                    list->scroll_offset = list->count - visible_items;
+                if (list->scroll_offset < 0)
+                    list->scroll_offset = 0;
+                
+                // Draw visible items
+                for (int i = list->scroll_offset; 
+                     i < list->count && i < list->scroll_offset + visible_items; 
+                     i++) {
+                    
+                    int item_y = y + (i - list->scroll_offset) * item_height;
+                    
+                    // Draw selection highlight if this is the selected item
+                    if (i == list->selected_index) {
+                        graphics_draw_rect(
+                            x + 1, item_y,
+                            item_area_width - 2, item_height,
+                            control == focused_control ? 0x0078D7 : 0xD0D0D0,
+                            1  // Filled
+                        );
+                        
+                        // Draw selected item text
+                        graphics_draw_string(
+                            x + 4, item_y + (item_height - 8) / 2,
+                            list->items[i].text,
+                            0xFFFFFF, // white text for selected item
+                            1  // Scale
+                        );
+                    } else {
+                        // Draw item text
+                        graphics_draw_string(
+                            x + 4, item_y + (item_height - 8) / 2,
+                            list->items[i].text,
+                            control_text_color,
+                            1  // Scale
+                        );
+                    }
+                }
+                
+                // Draw scrollbar if needed
+                if (draw_scrollbar) {
+                    // Draw scrollbar background
+                    graphics_draw_rect(
+                        x + control->width - scrollbar_width, y,
+                        scrollbar_width, control->height,
+                        0xE0E0E0,
+                        1  // Filled
+                    );
+                    
+                    // Calculate thumb size and position
+                    int thumb_height = (visible_items * control->height) / list->count;
+                    if (thumb_height < 10) thumb_height = 10;
+                    
+                    int max_scroll = list->count - visible_items;
+                    int thumb_y = 0;
+                    if (max_scroll > 0) {
+                        thumb_y = (list->scroll_offset * (control->height - thumb_height)) / max_scroll;
+                    }
+                    
+                    // Draw scrollbar thumb
+                    graphics_draw_rect(
+                        x + control->width - scrollbar_width + 1, y + thumb_y,
+                        scrollbar_width - 2, thumb_height,
+                        0x808080,
+                        1  // Filled
+                    );
+                }
+            }
+            break;
+            
+        case CONTROL_TYPE_DROPDOWN:
+            {
+                list_box_data_t* list = &control->data.list;
+                
+                // Draw dropdown button
+                graphics_draw_rect(
+                    x, y, control->width, control->height,
+                    control_bg_color,
+                    1  // Filled
+                );
+                
+                // Draw dropdown border
+                graphics_draw_rect(
+                    x, y, control->width, control->height,
+                    control_border_color,
+                    0  // Not filled
+                );
+                
+                // Draw selected item text or placeholder
+                graphics_draw_string(
+                    x + 5, y + (control->height - 8) / 2,
+                    control->text[0] != '\0' ? control->text : "<Select>",
+                    control->flags & CONTROL_FLAG_ENABLED ? control_text_color : 0x808080,
+                    1  // Scale
+                );
+                
+                // Draw dropdown arrow
+                int arrow_x = x + control->width - 16;
+                int arrow_y = y + (control->height - 10) / 2;
+                
+                graphics_draw_line(arrow_x, arrow_y, arrow_x + 10, arrow_y, control_text_color);
+                graphics_draw_line(arrow_x + 1, arrow_y + 1, arrow_x + 9, arrow_y + 1, control_text_color);
+                graphics_draw_line(arrow_x + 2, arrow_y + 2, arrow_x + 8, arrow_y + 2, control_text_color);
+                graphics_draw_line(arrow_x + 3, arrow_y + 3, arrow_x + 7, arrow_y + 3, control_text_color);
+                graphics_draw_line(arrow_x + 4, arrow_y + 4, arrow_x + 6, arrow_y + 4, control_text_color);
+                graphics_draw_line(arrow_x + 5, arrow_y + 5, arrow_x + 5, arrow_y + 5, control_text_color);
+                
+                // Draw dropdown list if open
+                if (control->state) {
+                    int item_height = 16; // Fixed item height
+                    int dropdown_height = list->count * item_height + 2; // +2 for border
+                    
+                    if (dropdown_height < 10) dropdown_height = 10;
+                    if (dropdown_height > 200) dropdown_height = 200; // Limit height
+                    
+                    // Draw dropdown list background
+                    graphics_draw_rect(
+                        x, y + control->height,
+                        control->width, dropdown_height,
+                        0xFFFFFF,
+                        1  // Filled
+                    );
+                    
+                    // Draw dropdown list border
+                    graphics_draw_rect(
+                        x, y + control->height,
+                        control->width, dropdown_height,
+                        control_border_color,
+                        0  // Not filled
+                    );
+                    
+                    // Calculate how many items can fit in the dropdown
+                    int visible_items = dropdown_height / item_height;
+                    if (visible_items > list->count) visible_items = list->count;
+                    
+                    // Draw visible items
+                    for (int i = 0; i < visible_items; i++) {
+                        int item_y = y + control->height + i * item_height;
+                        
+                        // Draw selection highlight if this is the selected item
+                        if (i == list->selected_index) {
+                            graphics_draw_rect(
+                                x + 1, item_y,
+                                control->width - 2, item_height,
+                                0x0078D7,
+                                1  // Filled
+                            );
+                            
+                            // Draw selected item text
+                            graphics_draw_string(
+                                x + 5, item_y + (item_height - 8) / 2,
+                                list->items[i].text,
+                                0xFFFFFF,
+                                1  // Scale
+                            );
+                        } else {
+                            // Draw item text
+                            graphics_draw_string(
+                                x + 5, item_y + (item_height - 8) / 2,
+                                list->items[i].text,
+                                control_text_color,
+                                1  // Scale
+                            );
+                        }
+                    }
+                }
+            }
+            break;
+            
+        default:
+            // Unknown control type, just draw a placeholder
+            graphics_draw_rect(
+                x, y, control->width, control->height,
+                0xC0C0C0,
+                1  // Filled
+            );
+            graphics_draw_rect(
+                x, y, control->width, control->height,
+                0x800080,
+                0  // Not filled
+            );
+            break;
+    }
+}
+
+/**
+ * Add an item to a list box or dropdown control
+ */
+int control_list_add_item(control_t* control, const char* text, void* user_data) {
+    if (!control || (control->type != CONTROL_TYPE_LIST_BOX && control->type != CONTROL_TYPE_DROPDOWN)) {
+        return -1;
+    }
+    
+    // Check if the list is full
+    if (control->data.list.count >= CONTROL_MAX_ITEMS) {
+        return -1;
+    }
+    
+    // Get the next available item slot
+    int index = control->data.list.count;
+    list_item_t* item = &control->data.list.items[index];
+    
+    // Copy the item text
+    strncpy(item->text, text, CONTROL_TEXT_MAX_LENGTH - 1);
+    item->text[CONTROL_TEXT_MAX_LENGTH - 1] = '\0';
+    
+    // Set the user data
+    item->user_data = user_data;
+    
+    // Increment the item count
+    control->data.list.count++;
+    
+    // If this is the first item, select it by default
+    if (control->data.list.count == 1) {
+        control->data.list.selected_index = 0;
+        
+        // For dropdowns, also update the text
+        if (control->type == CONTROL_TYPE_DROPDOWN) {
+            strncpy(control->text, text, CONTROL_TEXT_MAX_LENGTH - 1);
+            control->text[CONTROL_TEXT_MAX_LENGTH - 1] = '\0';
+        }
+        
+        // Call the selection change handler if defined
+        if (control->data.list.on_selection_change) {
+            control->data.list.on_selection_change(control, 0);
+        }
+    }
+    
+    return index;
+}
+
+/**
+ * Remove an item from a list box or dropdown control
+ */
+int control_list_remove_item(control_t* control, int index) {
+    if (!control || (control->type != CONTROL_TYPE_LIST_BOX && control->type != CONTROL_TYPE_DROPDOWN)) {
+        return 0;
+    }
+    
+    // Check if index is valid
+    if (index < 0 || index >= control->data.list.count) {
+        return 0;
+    }
+    
+    // Shift all items after the removed one
+    for (int i = index; i < control->data.list.count - 1; i++) {
+        memcpy(&control->data.list.items[i], &control->data.list.items[i + 1], sizeof(list_item_t));
+    }
+    
+    // Decrement the item count
+    control->data.list.count--;
+    
+    // Adjust the selected index if necessary
+    if (control->data.list.selected_index >= control->data.list.count) {
+        control->data.list.selected_index = control->data.list.count > 0 ? control->data.list.count - 1 : -1;
+    } else if (control->data.list.selected_index == index) {
+        // Selection was removed, select the next item or -1 if none
+        control->data.list.selected_index = index < control->data.list.count ? index : -1;
+    }
+    
+    // For dropdowns, update the text if selection changed
+    if (control->type == CONTROL_TYPE_DROPDOWN && control->data.list.selected_index >= 0) {
+        const char* text = control->data.list.items[control->data.list.selected_index].text;
+        strncpy(control->text, text, CONTROL_TEXT_MAX_LENGTH - 1);
+        control->text[CONTROL_TEXT_MAX_LENGTH - 1] = '\0';
+    }
+    
+    // Call the selection change handler if defined
+    if (control->data.list.on_selection_change) {
+        control->data.list.on_selection_change(control, control->data.list.selected_index);
+    }
+    
+    return 1;
+}
+
+/**
+ * Clear all items from a list box or dropdown control
+ */
+void control_list_clear(control_t* control) {
+    if (!control || (control->type != CONTROL_TYPE_LIST_BOX && control->type != CONTROL_TYPE_DROPDOWN)) {
+        return;
+    }
+    
+    // Reset the item count and selection
+    control->data.list.count = 0;
+    control->data.list.selected_index = -1;
+    control->data.list.scroll_offset = 0;
+    
+    // For dropdowns, reset the text to empty
+    if (control->type == CONTROL_TYPE_DROPDOWN) {
+        control->text[0] = '\0';
+    }
+}
+
+/**
+ * Get the selected item index from a list box or dropdown
+ */
+int control_list_get_selected_index(control_t* control) {
+    if (!control || (control->type != CONTROL_TYPE_LIST_BOX && control->type != CONTROL_TYPE_DROPDOWN)) {
+        return -1;
+    }
+    
+    return control->data.list.selected_index;
+}
+
+/**
+ * Set the selected item in a list box or dropdown
+ */
+void control_list_set_selected_index(control_t* control, int index) {
+    if (!control || (control->type != CONTROL_TYPE_LIST_BOX && control->type != CONTROL_TYPE_DROPDOWN)) {
+        return;
+    }
+    
+    // Validate index
+    if (index < -1 || index >= control->data.list.count) {
+        return;
+    }
+    
+    // Only update if selection changed
+    if (control->data.list.selected_index != index) {
+        control->data.list.selected_index = index;
+        
+        // For dropdowns, update the text
+        if (control->type == CONTROL_TYPE_DROPDOWN && index >= 0) {
+            const char* text = control->data.list.items[index].text;
+            strncpy(control->text, text, CONTROL_TEXT_MAX_LENGTH - 1);
+            control->text[CONTROL_TEXT_MAX_LENGTH - 1] = '\0';
+        }
+        
+        // Call the selection change handler if defined
+        if (control->data.list.on_selection_change) {
+            control->data.list.on_selection_change(control, index);
+        }
+    }
+}
+
+/**
+ * Set selection change handler for list box or dropdown
+ */
+void control_list_set_selection_handler(control_t* control, void (*handler)(control_t*, int)) {
+    if (!control || (control->type != CONTROL_TYPE_LIST_BOX && control->type != CONTROL_TYPE_DROPDOWN)) {
+        return;
+    }
+    
+    control->data.list.on_selection_change = handler;
 }

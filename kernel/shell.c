@@ -458,11 +458,13 @@ void shell_execute_command(const char *command) {
         } else if (strcmp(argv[0], "vfs") == 0) {
             cmd_vfs(argc, argv);
         } else if (strcmp(argv[0], "wdm") == 0) {
-            cmd_wdm(argc, argv);  // New Windows driver command
+            cmd_wdm(argc, argv);  // Windows driver command
         } else if (strcmp(argv[0], "usb") == 0) {
-            cmd_usb(argc, argv);  // New USB command
+            cmd_usb(argc, argv);  // USB command
         } else if (strcmp(argv[0], "vm") == 0) {
-            cmd_vm(argc, argv);  // New VM management command
+            cmd_vm(argc, argv);  // VM management command
+        } else if (strcmp(argv[0], "gui") == 0) {
+            cmd_gui(argc, argv);  // New GUI command
         } else {
             log_warning("SHELL", "Unknown command: %s", argv[0]);
             shell_println("Unknown command. Type 'help' for a list of commands.");
@@ -2743,5 +2745,263 @@ void cmd_vm(int argc, char *argv[]) {
     }
     else {
         shell_println("Unknown VM command. Try 'vm' for help.");
+    }
+}
+
+// GUI command implementation
+void cmd_gui(int argc, char *argv[]) {
+    #include "gui/window.h"
+    #include "gui/controls.h"
+    #include "gui/layout.h"
+    #include "graphics/graphics.h"
+    #include "keyboard.h"
+    
+    if (argc == 1) {
+        // Display usage information if no arguments
+        shell_println("GUI Subsystem Commands:");
+        shell_println("  gui start    - Start the GUI subsystem and enter graphical mode");
+        shell_println("  gui demo     - Run the GUI demonstration");
+        shell_println("  gui config   - Configure GUI settings");
+        shell_println("  gui info     - Display GUI subsystem information");
+        shell_println("  gui shutdown - Shut down GUI subsystem and return to text mode");
+        shell_println("");
+        shell_println("Examples:");
+        shell_println("  gui start    - Start the GUI interface");
+        return;
+    }
+    
+    if (strcmp(argv[1], "start") == 0) {
+        shell_println("Starting GUI subsystem...");
+        
+        // First initialize the graphics subsystem
+        int result = graphics_init();
+        if (result != 0) {
+            shell_println("Failed to initialize graphics subsystem!");
+            return;
+        }
+        
+        // Then initialize the window manager
+        result = window_manager_init();
+        if (result != 0) {
+            shell_println("Failed to initialize window manager!");
+            graphics_shutdown();
+            return;
+        }
+        
+        shell_println("GUI subsystem initialized. Starting GUI session...");
+        shell_println("Press ESC to return to command line.");
+        
+        // Short delay to allow message to be read
+        for (volatile int i = 0; i < 1000000; i++) { /* delay */ }
+        
+        // Start GUI main loop
+        extern void gui_main_loop(void);
+        gui_main_loop();
+        
+        // When GUI exits, restore text mode
+        shell_println("GUI session ended. Back to shell.");
+    }
+    else if (strcmp(argv[1], "demo") == 0) {
+        // Run GUI demo without full mode switch
+        shell_println("Starting GUI demonstration...");
+        
+        // Initialize graphics for the demo
+        int result = graphics_init();
+        if (result != 0) {
+            shell_println("Failed to initialize graphics subsystem!");
+            return;
+        }
+        
+        // Initialize the window manager
+        result = window_manager_init();
+        if (result != 0) {
+            shell_println("Failed to initialize window manager!");
+            graphics_shutdown();
+            return;
+        }
+        
+        shell_println("Running GUI demo. Press any key to exit.");
+        
+        // Short delay to allow message to be read
+        for (volatile int i = 0; i < 1000000; i++) { /* delay */ }
+        
+        // Run the GUI demo
+        extern void gui_demo(void);
+        gui_demo();
+        
+        // Clean up and return to text mode
+        window_manager_shutdown();
+        graphics_shutdown();
+        
+        shell_println("GUI demonstration completed.");
+    }
+    else if (strcmp(argv[1], "config") == 0) {
+        // Configure GUI settings
+        if (argc >= 3 && strcmp(argv[2], "resolution") == 0) {
+            if (argc < 4) {
+                shell_println("Available resolutions:");
+                shell_println("  640x480");
+                shell_println("  800x600");
+                shell_println("  1024x768");
+                shell_println("  1280x1024");
+                shell_println("Current resolution: 640x480");
+                return;
+            }
+            
+            // Set resolution based on argument
+            if (strcmp(argv[3], "640x480") == 0) {
+                shell_println("Setting resolution to 640x480");
+                graphics_set_resolution(GRAPHICS_RES_640X480);
+            }
+            else if (strcmp(argv[3], "800x600") == 0) {
+                shell_println("Setting resolution to 800x600");
+                graphics_set_resolution(GRAPHICS_RES_800X600);
+            }
+            else if (strcmp(argv[3], "1024x768") == 0) {
+                shell_println("Setting resolution to 1024x768");
+                graphics_set_resolution(GRAPHICS_RES_1024X768);
+            }
+            else if (strcmp(argv[3], "1280x1024") == 0) {
+                shell_println("Setting resolution to 1280x1024");
+                graphics_set_resolution(GRAPHICS_RES_1280X1024);
+            }
+            else {
+                shell_println("Unsupported resolution. Valid options: 640x480, 800x600, 1024x768, 1280x1024");
+            }
+        }
+        else if (argc >= 3 && strcmp(argv[2], "theme") == 0) {
+            if (argc < 4) {
+                shell_println("Available themes:");
+                shell_println("  classic  - Classic blue theme");
+                shell_println("  modern   - Modern flat theme");
+                shell_println("  dark     - Dark mode theme");
+                shell_println("  light    - Light mode theme");
+                shell_println("Current theme: classic");
+                return;
+            }
+            
+            // Set theme based on argument
+            if (strcmp(argv[3], "classic") == 0) {
+                shell_println("Setting theme to classic");
+                extern void gui_set_theme(int theme);
+                gui_set_theme(0); // Classic theme
+            }
+            else if (strcmp(argv[3], "modern") == 0) {
+                shell_println("Setting theme to modern");
+                extern void gui_set_theme(int theme);
+                gui_set_theme(1); // Modern theme
+            }
+            else if (strcmp(argv[3], "dark") == 0) {
+                shell_println("Setting theme to dark");
+                extern void gui_set_theme(int theme);
+                gui_set_theme(2); // Dark theme
+            }
+            else if (strcmp(argv[3], "light") == 0) {
+                shell_println("Setting theme to light");
+                extern void gui_set_theme(int theme);
+                gui_set_theme(3); // Light theme
+            }
+            else {
+                shell_println("Unsupported theme. Valid options: classic, modern, dark, light");
+            }
+        }
+        else {
+            shell_println("GUI Configuration Commands:");
+            shell_println("  gui config resolution [setting] - Configure display resolution");
+            shell_println("  gui config theme [setting]      - Configure GUI theme");
+        }
+    }
+    else if (strcmp(argv[1], "info") == 0) {
+        // Display GUI subsystem information
+        shell_println("GUI Subsystem Information:");
+        
+        // Check if graphics is initialized
+        int graphics_status = graphics_is_initialized();
+        shell_print("Graphics Subsystem: ");
+        shell_println(graphics_status ? "Initialized" : "Not initialized");
+        
+        // Current resolution
+        if (graphics_status) {
+            int width, height, bpp;
+            graphics_get_resolution(&width, &height, &bpp);
+            
+            char buffer[64] = "Current Resolution: ";
+            char num_str[16];
+            
+            int_to_string(width, num_str);
+            strcat(buffer, num_str);
+            strcat(buffer, "x");
+            
+            int_to_string(height, num_str);
+            strcat(buffer, num_str);
+            strcat(buffer, ", ");
+            
+            int_to_string(bpp, num_str);
+            strcat(buffer, num_str);
+            strcat(buffer, " bpp");
+            
+            shell_println(buffer);
+        }
+        
+        // Check if window manager is initialized
+        int wm_status = window_manager_is_initialized();
+        shell_print("Window Manager: ");
+        shell_println(wm_status ? "Initialized" : "Not initialized");
+        
+        // Window count
+        if (wm_status) {
+            int window_count = window_get_count();
+            char buffer[32] = "Active Windows: ";
+            char num_str[16];
+            
+            int_to_string(window_count, num_str);
+            strcat(buffer, num_str);
+            
+            shell_println(buffer);
+        }
+        
+        // Video memory information
+        shell_print("Video Memory: ");
+        uint32_t video_mem_kb = graphics_get_video_memory() / 1024;
+        
+        if (video_mem_kb >= 1024) {
+            char mb_str[16];
+            int_to_string(video_mem_kb / 1024, mb_str);
+            shell_print(mb_str);
+            shell_println(" MB");
+        } else {
+            char kb_str[16];
+            int_to_string(video_mem_kb, kb_str);
+            shell_print(kb_str);
+            shell_println(" KB");
+        }
+        
+        // Show current theme
+        shell_print("Current Theme: ");
+        extern int gui_get_current_theme(void);
+        int current_theme = gui_get_current_theme();
+        
+        switch (current_theme) {
+            case 0: shell_println("Classic"); break;
+            case 1: shell_println("Modern"); break;
+            case 2: shell_println("Dark"); break;
+            case 3: shell_println("Light"); break;
+            default: shell_println("Unknown"); break;
+        }
+    }
+    else if (strcmp(argv[1], "shutdown") == 0) {
+        // Shut down GUI subsystem
+        shell_println("Shutting down GUI subsystem...");
+        
+        // First shut down window manager
+        window_manager_shutdown();
+        
+        // Then shut down graphics
+        graphics_shutdown();
+        
+        shell_println("GUI subsystem shut down successfully.");
+    }
+    else {
+        shell_println("Unknown GUI command. Try 'gui' for help.");
     }
 }
