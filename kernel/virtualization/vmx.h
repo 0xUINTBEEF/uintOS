@@ -177,6 +177,30 @@
 #define VMX_HOST_RIP                        0x6C16
 #define VMX_VIRTUAL_PROCESSOR_ID            0x0000
 #define VMX_EPTP_INDEX                      0x0004
+#define VMX_EPT_POINTER                     0x201A
+#define VMX_GUEST_PHYSICAL_ADDRESS          0x2400
+#define VMX_VM_INSTRUCTION_ERROR            0x4400
+
+// EPT Memory Types
+#define EPT_MEMORY_TYPE_UNCACHEABLE         0
+#define EPT_MEMORY_TYPE_WRITE_COMBINING     1
+#define EPT_MEMORY_TYPE_WRITE_THROUGH       4
+#define EPT_MEMORY_TYPE_WRITE_PROTECTED     5
+#define EPT_MEMORY_TYPE_WRITEBACK           6
+
+// EPT Access Rights
+#define EPT_ACCESS_READ                     0x1
+#define EPT_ACCESS_WRITE                    0x2
+#define EPT_ACCESS_EXECUTE                  0x4
+
+// EPT Violation Qualifications
+#define EPT_VIOLATION_READ                  0x1
+#define EPT_VIOLATION_WRITE                 0x2
+#define EPT_VIOLATION_EXECUTE               0x4
+#define EPT_VIOLATION_READABLE              0x8
+#define EPT_VIOLATION_WRITEABLE             0x10
+#define EPT_VIOLATION_EXECUTABLE            0x20
+#define EPT_VIOLATION_GPA_VALID             0x80
 
 // Error codes
 #define VMX_SUCCESS                         0

@@ -307,6 +307,40 @@ int vmx_create_vm(const char* name, uint32_t memory_size, uint32_t vcpu_count) {
     memset(vm->io_bitmap_b, 0xFF, 4096);
     memset(vm->msr_bitmap, 0xFF, 4096);
     
+    // Allocate host stack for VM exits
+    vm->host_stack = (uint8_t*)malloc(16 * 1024); // 16KB stack
+    if (!vm->host_stack) {
+        log_error(VMX_LOG_TAG, "Failed to allocate host stack");
+        hal_physical_free(vm->io_bitmap_a_phys, 1);
+        hal_physical_free(vm->io_bitmap_b_phys, 1);
+        hal_physical_free(vm->msr_bitmap_phys, 1);
+        free(vm->guest_state);
+        hal_physical_free(vmcs_phys, 1);
+        memset(vm, 0, sizeof(vm_instance_t));
+        return VMX_ERROR_INSUFFICIENT_MEM;
+    }
+    vm->host_stack_top = vm->host_stack + 16 * 1024; // Stack grows down
+    
+    // Setup EPT (Extended Page Tables) for this VM
+    // Check if the CPU supports EPT
+    // In a real implementation, we would check via CPUID/MSR
+    vm->supports_ept = 1; // Assume EPT is supported for this demonstration
+    
+    // Setup EPT if supported
+    if (vm->supports_ept) {
+        log_debug(VMX_LOG_TAG, "Setting up EPT for VM %d", vm->id);
+        
+        // Initialize EPT structures for the VM
+        int ept_result = vm_memory_setup_ept(vm->id);
+        if (ept_result != 0) {
+            log_error(VMX_LOG_TAG, "Failed to setup EPT for VM %d: %d", vm->id, ept_result);
+            // Continue without EPT, or fail if EPT is required
+            vm->supports_ept = 0;
+        } else {
+            log_info(VMX_LOG_TAG, "EPT setup successful for VM %d", vm->id);
+        }
+    }
+    
     // Initialize vCPU context using HAL CPU context functions
     for (uint32_t i = 0; i < vcpu_count && i < MAX_VCPUS; i++) {
         // Allocate vCPU context
@@ -318,6 +352,7 @@ int vmx_create_vm(const char* name, uint32_t memory_size, uint32_t vcpu_count) {
                 free(vm->vcpu_contexts[j]);
             }
             // Free other resources
+            free(vm->host_stack);
             hal_physical_free(vm->io_bitmap_a_phys, 1);
             hal_physical_free(vm->io_bitmap_b_phys, 1);
             hal_physical_free(vm->msr_bitmap_phys, 1);
@@ -429,31 +464,66 @@ int vmx_setup_vmcs(uint32_t vm_id) {
     }
     
     // Set up control fields for the VM
-    // These settings are simplified for demonstration
     
     // 1. VM Entry controls
-    vmx_vmwrite(VMX_ENTRY_CONTROLS, 0x00000C92); // IA32e mode guest, load IA32_EFER
+    uint32_t entry_ctls = 0x00000C92; // IA32e mode guest, load IA32_EFER
+    vmx_vmwrite(VMX_ENTRY_CONTROLS, entry_ctls);
     
     // 2. VM Exit controls
-    vmx_vmwrite(VMX_EXIT_CONTROLS, 0x00036DFF); // Host address space size, load IA32_EFER
+    uint32_t exit_ctls = 0x00036DFF; // Host address space size, load IA32_EFER
+    vmx_vmwrite(VMX_EXIT_CONTROLS, exit_ctls);
     
     // 3. Pin-based VM execution controls
-    vmx_vmwrite(VMX_PIN_BASED_VM_EXEC_CONTROL, 0x00000001); // External interrupt exiting
+    uint32_t pin_ctls = 0x00000001; // External interrupt exiting
+    vmx_vmwrite(VMX_PIN_BASED_VM_EXEC_CONTROL, pin_ctls);
     
     // 4. Primary processor-based VM execution controls
-    vmx_vmwrite(VMX_CPU_BASED_VM_EXEC_CONTROL, 0x0000003F); // HLT, INVLPG, CR3 read/write, etc.
+    // Enable secondary controls and I/O bitmaps
+    uint32_t cpu_ctls = 0x0000203F; // HLT, INVLPG, CR3 read/write, use I/O bitmaps, activate secondary controls
+    vmx_vmwrite(VMX_CPU_BASED_VM_EXEC_CONTROL, cpu_ctls);
     
-    // 5. Secondary processor-based VM execution controls (if available)
-    vmx_vmwrite(VMX_SECONDARY_VM_EXEC_CONTROL, 0x00000000);
+    // 5. Secondary processor-based VM execution controls
+    // Enable EPT and unrestricted guest if supported
+    uint32_t secondary_ctls = 0x00000000;
+    
+    // Check if EPT is supported
+    // In a real implementation, we would check the VMX capability MSRs
+    if (vm->supports_ept) {
+        // Enable EPT (bit 1)
+        secondary_ctls |= (1 << 1);
+        log_debug(VMX_LOG_TAG, "Enabling EPT for VM %d", vm_id);
+        
+        // If we have EPT, we can also enable unrestricted guest mode
+        // Unrestricted guest allows real mode operation with paging enabled
+        if (vm->supports_unrestricted) {
+            secondary_ctls |= (1 << 7);
+            log_debug(VMX_LOG_TAG, "Enabling unrestricted guest for VM %d", vm_id);
+        }
+    }
+    
+    vmx_vmwrite(VMX_SECONDARY_VM_EXEC_CONTROL, secondary_ctls);
     
     // 6. Exception bitmap (which exceptions cause VM exits)
-    vmx_vmwrite(VMX_EXCEPTION_BITMAP, 0x00000000); // No exceptions cause VM exits
+    vmx_vmwrite(VMX_EXCEPTION_BITMAP, 0x00000000); // No exceptions cause VM exits initially
     
     // 7. Set up control registers
     vmx_vmwrite(VMX_CR0_GUEST_HOST_MASK, 0x00000000); // No bits cause VM exits
     vmx_vmwrite(VMX_CR4_GUEST_HOST_MASK, 0x00000000); // No bits cause VM exits
     
-    // 8. Guest state
+    // 8. Configure I/O bitmaps
+    vmx_vmwrite(VMX_IO_BITMAP_A_ADDR, vm->io_bitmap_a_phys);
+    vmx_vmwrite(VMX_IO_BITMAP_B_ADDR, vm->io_bitmap_b_phys);
+    
+    // 9. Configure MSR bitmap
+    vmx_vmwrite(VMX_MSR_BITMAP_ADDR, vm->msr_bitmap_phys);
+    
+    // 10. Configure Extended Page Table Pointer (EPTP) if EPT is enabled
+    if (vm->supports_ept && vm->eptp) {
+        vmx_vmwrite(VMX_EPT_POINTER, vm->eptp);
+        log_debug(VMX_LOG_TAG, "Configured EPTP: 0x%x", vm->eptp);
+    }
+    
+    // 11. Guest state
     // CR0, CR3, CR4
     vmx_vmwrite(VMX_GUEST_CR0, hal_cpu_read_cr0());
     vmx_vmwrite(VMX_GUEST_CR3, vm->cr3);

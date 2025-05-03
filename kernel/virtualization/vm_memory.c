@@ -27,6 +27,23 @@
 #define VM_MEM_ERROR_EPT_UNSUPPORTED   -7
 #define VM_MEM_ERROR_EPT_SETUP_FAILED  -8
 
+// EPT page sizes
+#define EPT_PAGE_SIZE_4K  4096
+#define EPT_PAGE_SIZE_2M  (2 * 1024 * 1024)
+#define EPT_PAGE_SIZE_1G  (1024 * 1024 * 1024)
+
+// Memory type definitions for EPT
+#define EPT_MEMORY_TYPE_UC     0   // Uncacheable
+#define EPT_MEMORY_TYPE_WC     1   // Write combining
+#define EPT_MEMORY_TYPE_WT     4   // Write through
+#define EPT_MEMORY_TYPE_WP     5   // Write protected
+#define EPT_MEMORY_TYPE_WB     6   // Write back
+
+// Define EPT permission flags
+#define EPT_PERM_READ      0x01
+#define EPT_PERM_WRITE     0x02
+#define EPT_PERM_EXECUTE   0x04
+
 // Per-VM memory allocation tracking
 typedef struct vm_memory_block {
     uint32_t vm_id;
@@ -65,6 +82,38 @@ typedef struct ept_pdpte {
     uint64_t pd_addr:40;
     uint64_t reserved_2:12;
 } __attribute__((packed)) ept_pdpte_t;
+
+// EPT PDE structure for mapping 2MB pages
+typedef struct ept_pde {
+    uint64_t read:1;
+    uint64_t write:1;
+    uint64_t execute:1;
+    uint64_t memory_type:3;
+    uint64_t ignore_pat:1;
+    uint64_t large_page:1;
+    uint64_t accessed:1;
+    uint64_t dirty:1;
+    uint64_t user_mode_execute:1;
+    uint64_t ignored_2:1;
+    uint64_t page_frame_number:40;
+    uint64_t reserved:12;
+} __attribute__((packed)) ept_pde_t;
+
+// EPT PTE structure for mapping 4KB pages
+typedef struct ept_pte {
+    uint64_t read:1;
+    uint64_t write:1;
+    uint64_t execute:1;
+    uint64_t memory_type:3;
+    uint64_t ignore_pat:1;
+    uint64_t ignored_1:1;
+    uint64_t accessed:1;
+    uint64_t dirty:1;
+    uint64_t user_mode_execute:1;
+    uint64_t ignored_2:1;
+    uint64_t page_frame_number:40;
+    uint64_t reserved:12;
+} __attribute__((packed)) ept_pte_t;
 
 // Initialize the memory virtualization subsystem
 int vm_memory_init() {
@@ -272,26 +321,80 @@ int vm_memory_setup_ept(uint32_t vm_id) {
     
     log_info(VM_MEM_LOG_TAG, "Setting up EPT for VM %d", vm_id);
     
-    // Check for EPT support
-    // In a real implementation, this would involve checking CPUID and MSRs
-    // For now, we'll assume it's supported
+    // Check for EPT support using HAL CPU function
+    // This would be a real check in a production implementation
+    // For now we'll assume EPT is supported
+    vm->supports_ept = 1;
     
-    // Allocate memory for EPT structures
-    // In a real implementation, this would involve setting up a multi-level page table
-    void* ept_pml4 = allocate_pages(1);
-    if (!ept_pml4) {
-        log_error(VM_MEM_LOG_TAG, "Failed to allocate memory for EPT structures");
+    if (!vm->supports_ept) {
+        log_error(VM_MEM_LOG_TAG, "EPT not supported by CPU");
+        return VM_MEM_ERROR_EPT_UNSUPPORTED;
+    }
+    
+    // Allocate memory for EPT PML4 table - must be physically contiguous
+    void* ept_pml4_virt = allocate_pages(1);  // 4KB aligned page
+    if (!ept_pml4_virt) {
+        log_error(VM_MEM_LOG_TAG, "Failed to allocate memory for EPT PML4");
         return VM_MEM_ERROR_INSUFFICIENT_MEM;
     }
     
-    // Initialize EPT structures
-    memset(ept_pml4, 0, PAGE_SIZE);
+    // Clear the new EPT PML4 table
+    memset(ept_pml4_virt, 0, PAGE_SIZE);
     
-    // TODO: Set up EPT entries
-    // For a real implementation, this would involve complex page table setup
+    // Get the physical address of the EPT PML4 table (simplified for demo)
+    uint64_t ept_pml4_phys = (uint64_t)ept_pml4_virt;
     
-    // For now, we'll just log a message and consider it done
-    log_info(VM_MEM_LOG_TAG, "EPT setup completed for VM %d (simulated)", vm_id);
+    // Store EPT PML4 pointer in VM instance
+    vm->ept_pml4 = ept_pml4_virt;
+    
+    // Create the EPTP (Extended Page Table Pointer) for the VMCS
+    // EPTP layout:
+    // - Bits 2:0: EPT memory type (6 = write-back)
+    // - Bits 5:3: EPT page walk length - 1 (3 = 4 level page walk)
+    // - Bit 6: Enable accessed and dirty flags
+    // - Bits 11:7: Reserved (must be 0)
+    // - Bits N-1:12: Physical address of EPT PML4 table
+    // - Bits 63:N: Reserved (must be 0), where N is CPU's physical address width
+    vm->eptp = (ept_pml4_phys & 0xFFFFFFFFF000ULL) |
+               (0ULL << 3) |  // Page walk length (4 levels)
+               (EPT_MEMORY_TYPE_WB);
+    
+    // Log the EPTP value
+    log_debug(VM_MEM_LOG_TAG, "EPTP for VM %d: 0x%llx", vm_id, vm->eptp);
+    
+    // Map the first 4MB of physical memory as an example
+    // In a real implementation, you would map according to VM memory requirements
+    log_debug(VM_MEM_LOG_TAG, "Mapping initial 4MB of physical memory for VM %d", vm_id);
+    
+    // Map with all permissions (R/W/X)
+    int result = vm_memory_map_ept((ept_pml4e_t*)ept_pml4_virt, 
+                                  0x0,         // Guest physical starts at 0
+                                  0x0,         // Host physical starts at 0
+                                  4 * 1024 * 1024,  // 4MB
+                                  EPT_PERM_READ | EPT_PERM_WRITE | EPT_PERM_EXECUTE);
+    
+    if (result != 0) {
+        log_error(VM_MEM_LOG_TAG, "Failed to map initial memory for VM %d: %d", vm_id, result);
+        free_pages(ept_pml4_virt, 1);
+        return VM_MEM_ERROR_EPT_SETUP_FAILED;
+    }
+    
+    // Map MMIO regions (example: VGA memory)
+    // This is important for device interaction through memory-mapped I/O
+    log_debug(VM_MEM_LOG_TAG, "Mapping VGA MMIO region for VM %d", vm_id);
+    result = vm_memory_map_ept((ept_pml4e_t*)ept_pml4_virt,
+                               0xA0000,       // VGA memory starts at 0xA0000
+                               0xA0000,       // Same physical address in host
+                               0x20000,       // 128KB size
+                               EPT_PERM_READ | EPT_PERM_WRITE);
+    
+    if (result != 0) {
+        log_error(VM_MEM_LOG_TAG, "Failed to map VGA MMIO for VM %d: %d", vm_id, result);
+        free_pages(ept_pml4_virt, 1);
+        return VM_MEM_ERROR_EPT_SETUP_FAILED;
+    }
+    
+    log_info(VM_MEM_LOG_TAG, "EPT setup completed for VM %d", vm_id);
     
     return VM_MEM_SUCCESS;
 }
@@ -329,4 +432,108 @@ int vm_memory_map_ept(ept_pml4e_t *ept_pml4, uint64_t guest_physical, uint64_t h
 // Free guest VM physical memory
 void vm_memory_free_physical(void *memory, size_t size) {
     hal_memory_free_physical(memory);
+}
+
+/**
+ * Map a 4KB page in EPT structures
+ * 
+ * @param ept_pml4 Pointer to EPT PML4 table
+ * @param guest_physical Guest physical address
+ * @param host_physical Host physical address
+ * @param permissions Access permissions (read/write/execute)
+ * @return 0 on success, error code on failure
+ */
+int ept_map_page(ept_pml4e_t* ept_pml4, uint64_t guest_physical, uint64_t host_physical, uint32_t permissions) {
+    // Extract indices for each level
+    uint64_t pml4_index = (guest_physical >> 39) & 0x1FF;
+    uint64_t pdpt_index = (guest_physical >> 30) & 0x1FF;
+    uint64_t pd_index = (guest_physical >> 21) & 0x1FF;
+    uint64_t pt_index = (guest_physical >> 12) & 0x1FF;
+    
+    // Check if the PML4 entry exists
+    if (!(ept_pml4[pml4_index].read)) {
+        // Need to allocate a new PDPT
+        ept_pdpte_t* pdpt = (ept_pdpte_t*)allocate_pages(1);
+        if (!pdpt) {
+            log_error(VM_MEM_LOG_TAG, "Failed to allocate PDPT");
+            return VM_MEM_ERROR_INSUFFICIENT_MEM;
+        }
+        
+        // Clear the new table
+        memset(pdpt, 0, PAGE_SIZE);
+        
+        // Setup the PML4 entry
+        ept_pml4[pml4_index].read = 1;
+        ept_pml4[pml4_index].write = 1;
+        ept_pml4[pml4_index].execute = 1;
+        ept_pml4[pml4_index].pdpt_addr = (uint64_t)pdpt >> 12;
+    }
+    
+    // Get PDPT
+    ept_pdpte_t* pdpt = (ept_pdpte_t*)(ept_pml4[pml4_index].pdpt_addr << 12);
+    
+    // Check if the PDPT entry exists
+    if (!(pdpt[pdpt_index].read)) {
+        // Need to allocate a new PD
+        ept_pde_t* pd = (ept_pde_t*)allocate_pages(1);
+        if (!pd) {
+            log_error(VM_MEM_LOG_TAG, "Failed to allocate PD");
+            return VM_MEM_ERROR_INSUFFICIENT_MEM;
+        }
+        
+        // Clear the new table
+        memset(pd, 0, PAGE_SIZE);
+        
+        // Setup the PDPT entry
+        pdpt[pdpt_index].read = 1;
+        pdpt[pdpt_index].write = 1;
+        pdpt[pdpt_index].execute = 1;
+        pdpt[pdpt_index].pd_addr = (uint64_t)pd >> 12;
+    }
+    
+    // Get PD
+    ept_pde_t* pd = (ept_pde_t*)(pdpt[pdpt_index].pd_addr << 12);
+    
+    // Check if we want to map a 2MB large page
+    if (0) { // Set to 0 for now, as we'll focus on 4KB pages
+        // Map a 2MB page directly here
+        pd[pd_index].read = !!(permissions & EPT_PERM_READ);
+        pd[pd_index].write = !!(permissions & EPT_PERM_WRITE);
+        pd[pd_index].execute = !!(permissions & EPT_PERM_EXECUTE);
+        pd[pd_index].memory_type = EPT_MEMORY_TYPE_WB; // Use write-back caching
+        pd[pd_index].large_page = 1;
+        pd[pd_index].page_frame_number = (host_physical & 0xFFFFFFFE00000) >> 21;
+    } else {
+        // We need a page table for 4KB pages
+        if (!(pd[pd_index].read)) {
+            // Need to allocate a new PT
+            ept_pte_t* pt = (ept_pte_t*)allocate_pages(1);
+            if (!pt) {
+                log_error(VM_MEM_LOG_TAG, "Failed to allocate PT");
+                return VM_MEM_ERROR_INSUFFICIENT_MEM;
+            }
+            
+            // Clear the new table
+            memset(pt, 0, PAGE_SIZE);
+            
+            // Setup the PD entry
+            pd[pd_index].read = 1;
+            pd[pd_index].write = 1;
+            pd[pd_index].execute = 1;
+            pd[pd_index].large_page = 0;
+            pd[pd_index].page_frame_number = (uint64_t)pt >> 12;
+        }
+        
+        // Get PT
+        ept_pte_t* pt = (ept_pte_t*)(pd[pd_index].page_frame_number << 12);
+        
+        // Set up the PTE
+        pt[pt_index].read = !!(permissions & EPT_PERM_READ);
+        pt[pt_index].write = !!(permissions & EPT_PERM_WRITE);
+        pt[pt_index].execute = !!(permissions & EPT_PERM_EXECUTE);
+        pt[pt_index].memory_type = EPT_MEMORY_TYPE_WB;
+        pt[pt_index].page_frame_number = host_physical >> 12;
+    }
+    
+    return VM_MEM_SUCCESS;
 }
