@@ -794,13 +794,20 @@ static int enter_sleep_state(void) {
     log_info("POWER", "Entering sleep state");
     
     // In S1, the CPU stops executing instructions
-    // For our implementation, we'll just halt the CPU until an interrupt occurs
+    // Add a timer to wake up after a short period rather than halting indefinitely
     
     // Ensure interrupts are enabled so we can wake up
     asm volatile("sti");
     
-    // Halt the CPU until an interrupt occurs
-    asm volatile("hlt");
+    // Set a timer to wake us up after 1 second rather than halting indefinitely
+    if (hal_initialized) {
+        hal_time_delay_ms(1000);  // Wait for 1 second
+    } else {
+        // If HAL not initialized, use a simple busy wait
+        for (volatile uint32_t i = 0; i < 10000000; i++) { /* delay */ }
+    }
+    
+    log_info("POWER", "Exiting sleep state");
     
     return 0;
 }
@@ -812,13 +819,20 @@ static int enter_suspend_state(void) {
     log_info("POWER", "Entering suspend state");
     
     // In real hardware, this would save state to RAM and put the system in a low power mode
-    // For our implementation, we'll do the same as sleep
+    // For our implementation, use a timer to wake up after a short period
     
     // Ensure interrupts are enabled so we can wake up
     asm volatile("sti");
     
-    // Halt the CPU until an interrupt occurs
-    asm volatile("hlt");
+    // Set a timer to wake us up after 2 seconds rather than halting indefinitely
+    if (hal_initialized) {
+        hal_time_delay_ms(2000);  // Wait for 2 seconds
+    } else {
+        // If HAL not initialized, use a simple busy wait
+        for (volatile uint32_t i = 0; i < 20000000; i++) { /* delay */ }
+    }
+    
+    log_info("POWER", "Exiting suspend state");
     
     return 0;
 }
@@ -830,13 +844,20 @@ static int enter_hibernate_state(void) {
     log_info("POWER", "Entering hibernate state");
     
     // In real hardware, this would save state to disk and power off
-    // For our implementation, we'll do the same as sleep
+    // For our implementation, use a timer to wake up after a short period
     
     // Ensure interrupts are enabled so we can wake up
     asm volatile("sti");
     
-    // Halt the CPU until an interrupt occurs
-    asm volatile("hlt");
+    // Set a timer to wake us up after 3 seconds rather than halting indefinitely
+    if (hal_initialized) {
+        hal_time_delay_ms(3000);  // Wait for 3 seconds
+    } else {
+        // If HAL not initialized, use a simple busy wait
+        for (volatile uint32_t i = 0; i < 30000000; i++) { /* delay */ }
+    }
+    
+    log_info("POWER", "Exiting hibernate state");
     
     return 0;
 }

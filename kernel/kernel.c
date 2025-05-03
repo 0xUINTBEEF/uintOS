@@ -236,6 +236,26 @@ void initialize_system() {
         // HAL initialized successfully
         hal_initialized = 1;
         log_info("KERNEL", "HAL initialized successfully");
+        
+        // Verify individual HAL components are working correctly
+        log_debug("KERNEL", "Verifying HAL components");
+        
+        // Check HAL timer subsystem
+        hal_timer_info_t timer_info;
+        if (hal_timer_get_info(0, &timer_info) != HAL_TIMER_SUCCESS) {
+            log_warning("KERNEL", "HAL timer subsystem not available or not properly initialized");
+        } else {
+            log_debug("KERNEL", "HAL timer subsystem initialized successfully");
+        }
+        
+        // Check HAL memory subsystem
+        hal_memory_map_t memory_map;
+        if (hal_memory_get_map(&memory_map) != 0) {
+            log_warning("KERNEL", "HAL memory subsystem not available or not properly initialized");
+        } else {
+            log_debug("KERNEL", "HAL memory subsystem initialized successfully");
+        }
+        
         vga_init();
         vga_set_color(vga_entry_color(VGA_COLOR_GREEN, VGA_COLOR_BLACK));
         vga_write_string("HAL initialized successfully\n");

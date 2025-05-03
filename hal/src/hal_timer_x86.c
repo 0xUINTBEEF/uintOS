@@ -663,10 +663,42 @@ int hal_timer_calibrate(void) {
     hal_io_port_out8(0x40, 0xFF);  // Low byte of count (max)
     hal_io_port_out8(0x40, 0xFF);  // High byte of count (max)
     
+    // Check if PIT output bit is functioning - try to detect changes
+    uint8_t pit_bit_initial = hal_io_port_in8(0x61) & 0x20;
+    unsigned int check_timeout = 0;
+    uint8_t pit_bit_changed = 0;
+    
+    for (unsigned int i = 0; i < 1000000; i++) {
+        if ((hal_io_port_in8(0x61) & 0x20) != pit_bit_initial) {
+            pit_bit_changed = 1;
+            break;
+        }
+    }
+    
+    if (!pit_bit_changed) {
+        log_error("HAL Timer", "PIT output bit not toggling, cannot calibrate timer");
+        log_debug("HAL Timer", "Using fallback frequency estimate");
+        g_tsc_frequency = 3000000000ULL; // 3 GHz estimate
+        g_tsc_calibrated = false;
+        return HAL_TIMER_CALIBRATION_FAILED;
+    }
+    
     // Wait for first PIT cycle to complete
     uint8_t initial_count = hal_io_port_in8(0x61) & 0x20;
+    
+    unsigned int timeout_counter = 0;
     while ((hal_io_port_in8(0x61) & 0x20) == initial_count) {
-        // Wait for state change
+        timeout_counter++;
+        if (timeout_counter > 1000000) {
+            // If we timeout, log error and exit calibration
+            log_error("HAL Timer", "Timeout waiting for initial PIT cycle");
+            g_tsc_frequency = 3000000000ULL; // 3 GHz estimate
+            g_tsc_calibrated = false;
+            return HAL_TIMER_CALIBRATION_FAILED;
+        }
+        
+        // Short busy-wait delay
+        for (volatile int j = 0; j < 10; j++) { /* very short delay */ }
     }
     
     // Start TSC measurement
@@ -675,9 +707,18 @@ int hal_timer_calibrate(void) {
     // Wait for 100 PIT cycles (about 100ms for 1.19MHz clock)
     uint8_t last_tick = hal_io_port_in8(0x61) & 0x20;
     for (int i = 0; i < 100; i++) {
-        // Wait for output bit to toggle
+        // Wait for output bit to toggle with timeout
+        unsigned int timeout_counter = 0;
         while ((hal_io_port_in8(0x61) & 0x20) == last_tick) {
-            // Wait for state change
+            // Add timeout to prevent infinite loop
+            timeout_counter++;
+            if (timeout_counter > 1000000) {
+                // If we timeout, log error and exit calibration
+                log_error("HAL Timer", "Timeout waiting for PIT to toggle");
+                return HAL_TIMER_CALIBRATION_FAILED;
+            }
+            // Short busy-wait delay
+            for (volatile int j = 0; j < 10; j++) { /* very short delay */ }
         }
         last_tick = hal_io_port_in8(0x61) & 0x20;
     }
