@@ -221,6 +221,55 @@ enable_a20_line:
     jz .a20_kbd_wait_data
     ret
 
+; Check A20 line status
+check_a20:
+    pushf
+    push ds
+    push es
+    push di
+    push si
+    
+    cli                         ; Disable interrupts
+    
+    ; Set DS:SI = 0000:0500
+    xor ax, ax
+    mov ds, ax
+    mov si, 0x0500
+    
+    ; Set ES:DI = FFFF:0510
+    mov ax, 0xFFFF
+    mov es, ax
+    mov di, 0x0510
+    
+    ; Save original values at these addresses
+    mov dl, [ds:si]
+    mov dh, [es:di]
+    
+    ; Write different values to test
+    mov byte [ds:si], 0xAA
+    mov byte [es:di], 0x55
+    
+    ; Check if addresses wrap around (A20 disabled) or are separate (A20 enabled)
+    cmp byte [ds:si], 0x55      ; If A20 is disabled, writing to FFFF:0510 affects 0000:0500
+    
+    ; Restore original values
+    mov [ds:si], dl
+    mov [es:di], dh
+    
+    ; Set return value (0 = disabled, 1 = enabled)
+    mov ax, 0                   ; Assume A20 is disabled
+    je .done                    ; If they're equal, A20 is disabled
+    mov ax, 1                   ; A20 is enabled
+    
+.done:
+    sti                         ; Restore interrupts
+    pop si
+    pop di
+    pop es
+    pop ds
+    popf
+    ret
+
 ; Enhanced memory detection with E820 and fallback methods
 detect_memory:
     mov di, memory_map_buffer
