@@ -11,6 +11,27 @@
 #include "../include/ethernet.h"
 #include "../../memory/heap.h"
 #include "../../kernel/logging/log.h"
+#include "../include/network.h"
+
+// IPv4 header structure
+typedef struct ip_header {
+    uint8_t  version_ihl;           // Version and IHL
+    uint8_t  type_of_service;       // Type of Service
+    uint16_t total_length;          // Total Length
+    uint16_t identification;        // Identification
+    uint16_t flags_fragment_offset; // Flags and Fragment Offset
+    uint8_t  ttl;                   // Time to Live
+    uint8_t  protocol;              // Protocol
+    uint16_t header_checksum;       // Header Checksum
+    uint8_t  source_ip[4];          // Source IP Address
+    uint8_t  dest_ip[4];            // Destination IP Address
+    // Options and padding...
+} __attribute__((packed)) ip_header_t;
+
+// Global IP state
+static struct {
+    uint16_t next_id;               // Next IP identification value
+} ip_state;
 
 // Protocol handlers for IP protocols
 typedef int (*ip_protocol_handler_t)(net_buffer_t* buffer, const ip_addr_t* src, const ip_addr_t* dest);
@@ -40,6 +61,13 @@ int ip_init() {
     ip_str_to_addr("0.0.0.0", &default_gateway);
     
     log_info("IP protocol handler initialized");
+
+    log_info("Initializing IPv4 protocol");
+    
+    // Initialize IP state
+    ip_state.next_id = 1;
+    
+    log_info("IPv4 protocol initialized");
     return 0;
 }
 
@@ -91,25 +119,26 @@ static ip_protocol_handler_t ip_find_protocol_handler(uint8_t protocol) {
  * Calculate the IP header checksum
  */
 static uint16_t ip_checksum(const void* data, size_t len) {
+    const uint16_t* buf = (const uint16_t*)data;
     uint32_t sum = 0;
-    const uint16_t* ptr = (const uint16_t*)data;
     
-    // Sum up 16-bit words
+    // Add up all 16-bit words
     while (len > 1) {
-        sum += *ptr++;
+        sum += *buf++;
         len -= 2;
     }
     
-    // Add left-over byte, if any
+    // Add the last byte if there's an odd number of bytes
     if (len > 0) {
-        sum += *(uint8_t*)ptr;
+        sum += *(uint8_t*)buf;
     }
     
-    // Fold 32-bit sum to 16 bits
+    // Add carry bits
     while (sum >> 16) {
         sum = (sum & 0xFFFF) + (sum >> 16);
     }
     
+    // Return one's complement of the sum
     return ~sum;
 }
 
@@ -215,6 +244,116 @@ int ip_rx(net_buffer_t* buffer) {
 }
 
 /**
+ * Handle incoming IPv4 packet
+ */
+int ip_receive(net_buffer_t* buffer) {
+    if (!buffer || !buffer->data || buffer->len < sizeof(ip_header_t)) {
+        return NET_ERR_INVALID;
+    }
+    
+    // Get the IP header
+    ip_header_t* header = (ip_header_t*)buffer->data;
+    
+    // Verify header length
+    uint8_t ihl = header->version_ihl & 0x0F;
+    if (ihl < 5) {
+        log_warning("IP: Invalid header length: %d", ihl);
+        return NET_ERR_INVALID;
+    }
+    
+    // Verify IP version
+    uint8_t version = (header->version_ihl >> 4) & 0x0F;
+    if (version != 4) {
+        log_warning("IP: Unsupported IP version: %d", version);
+        return NET_ERR_INVALID;
+    }
+    
+    // Verify checksum
+    uint16_t orig_checksum = header->header_checksum;
+    header->header_checksum = 0;
+    uint16_t calc_checksum = ip_checksum(header, ihl * 4);
+    header->header_checksum = orig_checksum;
+    
+    if (orig_checksum != calc_checksum) {
+        log_warning("IP: Invalid checksum");
+        return NET_ERR_INVALID;
+    }
+    
+    // Convert endianness for multi-byte fields
+    header->total_length = (header->total_length >> 8) | (header->total_length << 8);
+    header->identification = (header->identification >> 8) | (header->identification << 8);
+    header->flags_fragment_offset = (header->flags_fragment_offset >> 8) | (header->flags_fragment_offset << 8);
+    header->header_checksum = (header->header_checksum >> 8) | (header->header_checksum << 8);
+    
+    // Check if this packet is for us
+    int is_for_us = 0;
+    ipv4_address_t dest_ip;
+    memcpy(&dest_ip.addr, header->dest_ip, 4);
+    
+    // Check if destination IP matches any of our interfaces
+    net_device_t* dev = buffer->device;
+    if (memcmp(&dev->ip, &dest_ip, sizeof(ipv4_address_t)) == 0) {
+        is_for_us = 1;
+    }
+    
+    // Check for broadcast/multicast
+    if (!is_for_us) {
+        // Check for limited broadcast (255.255.255.255)
+        if (dest_ip.addr[0] == 255 && dest_ip.addr[1] == 255 &&
+            dest_ip.addr[2] == 255 && dest_ip.addr[3] == 255) {
+            is_for_us = 1;
+        }
+        
+        // Check for subnet broadcast
+        uint32_t ip_addr = (dest_ip.addr[0] << 24) | (dest_ip.addr[1] << 16) | 
+                           (dest_ip.addr[2] << 8) | dest_ip.addr[3];
+        uint32_t dev_ip = (dev->ip.addr[0] << 24) | (dev->ip.addr[1] << 16) |
+                          (dev->ip.addr[2] << 8) | dev->ip.addr[3];
+        uint32_t netmask = (dev->netmask.addr[0] << 24) | (dev->netmask.addr[1] << 16) |
+                           (dev->netmask.addr[2] << 8) | dev->netmask.addr[3];
+        uint32_t subnet = dev_ip & netmask;
+        uint32_t broadcast = subnet | (~netmask);
+        
+        if (ip_addr == broadcast) {
+            is_for_us = 1;
+        }
+    }
+    
+    // If not for us, drop the packet (we don't do routing yet)
+    if (!is_for_us) {
+        log_debug("IP: Packet not for us, dropping");
+        return NET_ERR_OK;
+    }
+    
+    // Skip the IP header
+    net_buffer_pull(buffer, ihl * 4);
+    
+    // Process based on the protocol
+    switch (header->protocol) {
+        case 1:  // ICMP
+            // Pass to ICMP handler
+            buffer->protocol = NET_PROTO_ICMP;
+            // icmp_receive(buffer);
+            break;
+        case 6:  // TCP
+            // Pass to TCP handler
+            buffer->protocol = NET_PROTO_TCP;
+            // tcp_receive(buffer);
+            break;
+        case 17: // UDP
+            // Pass to UDP handler
+            buffer->protocol = NET_PROTO_UDP;
+            // udp_receive(buffer);
+            break;
+        default:
+            log_debug("IP: Unsupported protocol: %d", header->protocol);
+            break;
+    }
+    
+    return NET_ERR_OK;
+}
+
+/**
  * Send an IP packet
  */
 int ip_tx(net_device_t* dev, net_buffer_t* buffer, const ip_addr_t* dest_addr, uint8_t protocol) {
@@ -281,6 +420,109 @@ int ip_tx(net_device_t* dev, net_buffer_t* buffer, const ip_addr_t* dest_addr, u
     
     // Send the Ethernet frame
     return ethernet_tx(dev, buffer, &next_hop_mac, ETH_TYPE_IP);
+}
+
+/**
+ * Create and send an IPv4 packet
+ */
+int ip_send(net_buffer_t* buffer, const ipv4_address_t* dest_ip, uint8_t protocol) {
+    if (!buffer || !dest_ip) {
+        return NET_ERR_INVALID;
+    }
+    
+    // Make room for the IP header
+    ip_header_t* header = (ip_header_t*)net_buffer_push(buffer, sizeof(ip_header_t));
+    if (!header) {
+        log_error("IP: Failed to add IP header to packet");
+        return NET_ERR_NOMEM;
+    }
+    
+    // Set up the header
+    header->version_ihl = 0x45;  // IPv4, 5 DWORDS (standard IP header)
+    header->type_of_service = 0;
+    header->total_length = buffer->len;
+    header->identification = ip_state.next_id++;
+    header->flags_fragment_offset = 0x4000;  // Don't fragment
+    header->ttl = 64;  // TTL
+    header->protocol = protocol;
+    header->header_checksum = 0;
+    
+    // Find the best network device to use
+    net_device_t* dev = NULL;
+    if (buffer->device) {
+        dev = buffer->device;
+    } else {
+        // Find the appropriate device based on routing (simplified for now)
+        // In a full implementation, we would check the routing table
+        
+        // Check if it's a local subnet or needs to go through a gateway
+        for (int i = 0; i < network_get_device_count(); i++) {
+            net_device_t* cur_dev = network_get_device(i);
+            if (!(cur_dev->flags & NET_DEV_FLAG_UP)) {
+                continue;  // Skip down interfaces
+            }
+            
+            uint32_t ip_addr = (dest_ip->addr[0] << 24) | (dest_ip->addr[1] << 16) | 
+                              (dest_ip->addr[2] << 8) | dest_ip->addr[3];
+            uint32_t dev_ip = (cur_dev->ip.addr[0] << 24) | (cur_dev->ip.addr[1] << 16) |
+                              (cur_dev->ip.addr[2] << 8) | cur_dev->ip.addr[3];
+            uint32_t netmask = (cur_dev->netmask.addr[0] << 24) | (cur_dev->netmask.addr[1] << 16) |
+                               (cur_dev->netmask.addr[2] << 8) | cur_dev->netmask.addr[3];
+            
+            if ((ip_addr & netmask) == (dev_ip & netmask)) {
+                dev = cur_dev;
+                break;
+            }
+        }
+        
+        // If no matching device, use the default
+        if (!dev) {
+            dev = network_get_default_device();
+        }
+    }
+    
+    if (!dev) {
+        log_error("IP: No suitable interface found for sending packet");
+        return NET_ERR_INVALID;
+    }
+    
+    buffer->device = dev;
+    
+    // Set source IP address from the device
+    memcpy(header->source_ip, dev->ip.addr, 4);
+    
+    // Set destination IP address
+    memcpy(header->dest_ip, dest_ip->addr, 4);
+    
+    // Convert endianness for multi-byte fields
+    header->total_length = (header->total_length << 8) | (header->total_length >> 8);
+    header->identification = (header->identification << 8) | (header->identification >> 8);
+    header->flags_fragment_offset = (header->flags_fragment_offset << 8) | (header->flags_fragment_offset >> 8);
+    
+    // Calculate checksum
+    header->header_checksum = ip_checksum(header, sizeof(ip_header_t));
+    header->header_checksum = (header->header_checksum << 8) | (header->header_checksum >> 8);
+    
+    // Send the packet on the appropriate network interface
+    // This will depend on the device type - for Ethernet, we need to add an Ethernet header
+    
+    // Determine the MAC address to use (ARP lookup)
+    // For now, we'll use a dummy MAC address for development
+    mac_address_t dest_mac;
+    memset(&dest_mac, 0xFF, sizeof(mac_address_t)); // Broadcast for now
+    
+    // In a real implementation, we would do:
+    // 1. ARP lookup if needed
+    // 2. Add the appropriate link-layer header
+    // 3. Send the packet out the interface
+    
+    // For now, just log that we would send it
+    char ip_str[16];
+    ipv4_to_str(dest_ip, ip_str);
+    log_info("IP: Would send packet to %s via %s (protocol %d, %d bytes)",
+             ip_str, dev->name, protocol, buffer->len);
+    
+    return NET_ERR_OK;
 }
 
 /**
@@ -491,4 +733,87 @@ void ip_get_config(ip_addr_t* ip, ip_addr_t* mask, ip_addr_t* gateway) {
     if (gateway != NULL) {
         ip_addr_copy(gateway, &default_gateway);
     }
+}
+
+/**
+ * Get IP address for a network interface
+ */
+int ip_get_address(const char* interface, ipv4_address_t* addr) {
+    if (!interface || !addr) {
+        return NET_ERR_INVALID;
+    }
+    
+    net_device_t* dev = network_find_device_by_name(interface);
+    if (!dev) {
+        return NET_ERR_INVALID;
+    }
+    
+    memcpy(addr, &dev->ip, sizeof(ipv4_address_t));
+    return NET_ERR_OK;
+}
+
+/**
+ * Set IP address for a network interface
+ */
+int ip_set_address(const char* interface, const ipv4_address_t* addr) {
+    if (!interface || !addr) {
+        return NET_ERR_INVALID;
+    }
+    
+    net_device_t* dev = network_find_device_by_name(interface);
+    if (!dev) {
+        return NET_ERR_INVALID;
+    }
+    
+    memcpy(&dev->ip, addr, sizeof(ipv4_address_t));
+    
+    char ip_str[16];
+    ipv4_to_str(addr, ip_str);
+    log_info("IP: Set address of %s to %s", interface, ip_str);
+    
+    return NET_ERR_OK;
+}
+
+/**
+ * Set netmask for a network interface
+ */
+int ip_set_netmask(const char* interface, const ipv4_address_t* netmask) {
+    if (!interface || !netmask) {
+        return NET_ERR_INVALID;
+    }
+    
+    net_device_t* dev = network_find_device_by_name(interface);
+    if (!dev) {
+        return NET_ERR_INVALID;
+    }
+    
+    memcpy(&dev->netmask, netmask, sizeof(ipv4_address_t));
+    
+    char mask_str[16];
+    ipv4_to_str(netmask, mask_str);
+    log_info("IP: Set netmask of %s to %s", interface, mask_str);
+    
+    return NET_ERR_OK;
+}
+
+/**
+ * Set default gateway for a network interface
+ */
+int ip_set_gateway(const char* interface, const ipv4_address_t* gateway) {
+    if (!interface || !gateway) {
+        return NET_ERR_INVALID;
+    }
+    
+    net_device_t* dev = network_find_device_by_name(interface);
+    if (!dev) {
+        return NET_ERR_INVALID;
+    }
+    
+    memcpy(&dev->gateway, gateway, sizeof(ipv4_address_t));
+    
+    char gw_str[16];
+    ipv4_to_str(gateway, gw_str);
+    log_info("IP: Set gateway of %s to %s", interface, gw_str);
+    
+    return NET_ERR_OK;
 }

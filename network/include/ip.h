@@ -8,7 +8,21 @@
 #ifndef IP_H
 #define IP_H
 
+#include <stdint.h>
+#include <stddef.h>
 #include "network.h"
+
+/**
+ * IP address length in bytes
+ */
+#define IP_ADDR_LENGTH 4
+
+/**
+ * IP address structure (IPv4)
+ */
+typedef struct ip_addr {
+    uint8_t bytes[IP_ADDR_LENGTH];
+} __attribute__((packed)) ip_addr_t;
 
 /**
  * IP protocol version 4
@@ -28,11 +42,23 @@
 #define IP_PROTO_UDP  17    // User Datagram Protocol
 
 /**
+ * IP header constants
+ */
+#define IP_HEADER_MIN_SIZE 20
+#define IP_VERSION(hdr)    (((hdr)->version_and_ihl >> 4) & 0x0F)
+#define IP_IHL(hdr)        ((hdr)->version_and_ihl & 0x0F)
+
+/**
  * IP flags
  */
-#define IP_FLAG_RESERVED 0x8000  // Reserved (must be 0)
-#define IP_FLAG_DF       0x4000  // Don't Fragment
-#define IP_FLAG_MF       0x2000  // More Fragments
+#define IP_FLAG_RESERVED        0x0
+#define IP_FLAG_DONT_FRAGMENT   0x2
+#define IP_FLAG_MORE_FRAGMENTS  0x4
+
+/**
+ * IP fragment offset mask
+ */
+#define IP_FRAGMENT_OFFSET_MASK 0x1FFF
 
 /**
  * IPv4 header structure
@@ -66,6 +92,15 @@ extern const ipv4_address_t IP_ADDR_LOOPBACK;  // 127.0.0.1
 int ip_init();
 
 /**
+ * Register a protocol handler for an IP protocol
+ * 
+ * @param protocol The IP protocol number
+ * @param handler The handler function
+ * @return 0 on success, error code on failure
+ */
+int ip_register_protocol(uint8_t protocol, int (*handler)(net_buffer_t* buffer));
+
+/**
  * Process an incoming IP packet
  * 
  * @param buffer Network buffer containing the packet
@@ -76,15 +111,13 @@ int ip_rx(net_buffer_t* buffer);
 /**
  * Send an IP packet
  * 
- * @param buffer Network buffer containing the packet to send
- * @param src Source IP address (NULL for automatic selection)
- * @param dst Destination IP address
- * @param protocol Protocol number (e.g., IP_PROTO_TCP)
- * @param ttl Time to live value
+ * @param dev Network device to send on
+ * @param buffer Network buffer containing the payload
+ * @param dest_addr Destination IP address
+ * @param protocol IP protocol number
  * @return 0 on success, error code on failure
  */
-int ip_tx(net_buffer_t* buffer, const ipv4_address_t* src, 
-          const ipv4_address_t* dst, uint8_t protocol, uint8_t ttl);
+int ip_tx(net_device_t* dev, net_buffer_t* buffer, const ip_addr_t* dest_addr, uint8_t protocol);
 
 /**
  * Create a new IP packet with space for payload
@@ -173,15 +206,6 @@ void ip_set_addresses(ip_header_t* header,
                      const ipv4_address_t* dst);
 
 /**
- * Register a protocol handler for IP packets
- * 
- * @param protocol Protocol number
- * @param handler Function to handle packets of this protocol
- * @return 0 on success, error code on failure
- */
-int ip_register_protocol(uint8_t protocol, int (*handler)(net_buffer_t*));
-
-/**
  * Get a string representation of an IP protocol
  * 
  * @param protocol Protocol number
@@ -203,5 +227,152 @@ int ip_set_forwarding(int enable);
  * @return 1 if enabled, 0 if disabled
  */
 int ip_get_forwarding();
+
+/**
+ * Format an IP address as a string
+ * 
+ * @param addr IP address
+ * @param buffer Output buffer (must be at least 16 bytes)
+ * @return Pointer to the buffer or NULL on failure
+ */
+char* ip_addr_to_str(const ip_addr_t* addr, char* buffer);
+
+/**
+ * Parse an IP address from a string
+ * 
+ * @param str String containing the IP address
+ * @param addr Output IP address
+ * @return 0 on success, error code on failure
+ */
+int ip_str_to_addr(const char* str, ip_addr_t* addr);
+
+/**
+ * Check if an IP address is a broadcast address
+ * 
+ * @param addr IP address
+ * @return 1 if broadcast, 0 otherwise
+ */
+int ip_is_broadcast(const ip_addr_t* addr);
+
+/**
+ * Check if an IP address is a multicast address
+ * 
+ * @param addr IP address
+ * @return 1 if multicast, 0 otherwise
+ */
+int ip_is_multicast(const ip_addr_t* addr);
+
+/**
+ * Check if an IP address is zero (0.0.0.0)
+ * 
+ * @param addr IP address
+ * @return 1 if zero, 0 otherwise
+ */
+int ip_is_zero_address(const ip_addr_t* addr);
+
+/**
+ * Compare two IP addresses
+ * 
+ * @param addr1 First IP address
+ * @param addr2 Second IP address
+ * @return 0 if equal, non-zero otherwise
+ */
+int ip_addr_cmp(const ip_addr_t* addr1, const ip_addr_t* addr2);
+
+/**
+ * Copy an IP address
+ * 
+ * @param dst Destination IP address
+ * @param src Source IP address
+ */
+void ip_addr_copy(ip_addr_t* dst, const ip_addr_t* src);
+
+/**
+ * Check if an IP address is on the local subnet
+ * 
+ * @param addr IP address
+ * @return 1 if on local subnet, 0 otherwise
+ */
+int ip_is_on_local_subnet(const ip_addr_t* addr);
+
+/**
+ * Check if an IP address is a local address (assigned to this host)
+ * 
+ * @param addr IP address
+ * @return 1 if local, 0 otherwise
+ */
+int ip_is_local_address(const ip_addr_t* addr);
+
+/**
+ * Configure the local IP settings
+ * 
+ * @param ip Local IP address
+ * @param mask Subnet mask
+ * @param gateway Default gateway
+ */
+void ip_configure(const ip_addr_t* ip, const ip_addr_t* mask, const ip_addr_t* gateway);
+
+/**
+ * Get the current IP configuration
+ * 
+ * @param ip Output for local IP address
+ * @param mask Output for subnet mask
+ * @param gateway Output for default gateway
+ */
+void ip_get_config(ip_addr_t* ip, ip_addr_t* mask, ip_addr_t* gateway);
+
+/**
+ * Handle incoming IPv4 packet from the network stack
+ * 
+ * @param buffer Network buffer containing the IP packet
+ * @return 0 on success, error code on failure
+ */
+int ip_receive(net_buffer_t* buffer);
+
+/**
+ * Send an IPv4 packet to the network
+ * 
+ * @param buffer Network buffer with the payload
+ * @param dest_ip Destination IP address
+ * @param protocol IP protocol number
+ * @return 0 on success, error code on failure
+ */
+int ip_send(net_buffer_t* buffer, const ipv4_address_t* dest_ip, uint8_t protocol);
+
+/**
+ * Get IP address for a network interface
+ * 
+ * @param interface Interface name
+ * @param addr Output IP address
+ * @return 0 on success, error code on failure
+ */
+int ip_get_address(const char* interface, ipv4_address_t* addr);
+
+/**
+ * Set IP address for a network interface
+ * 
+ * @param interface Interface name
+ * @param addr IP address
+ * @return 0 on success, error code on failure
+ */
+int ip_set_address(const char* interface, const ipv4_address_t* addr);
+
+/**
+ * Set netmask for a network interface
+ * 
+ * @param interface Interface name
+ * @param netmask Subnet mask
+ * @return 0 on success, error code on failure
+ */
+int ip_set_netmask(const char* interface, const ipv4_address_t* netmask);
+
+/**
+ * Set default gateway for a network interface
+ * 
+ * @param interface Interface name
+ * @param gateway Default gateway IP address
+ * @return 0 on success, error code on failure
+ */
+int ip_set_gateway(const char* interface, const ipv4_address_t* gateway);
 
 #endif /* IP_H */

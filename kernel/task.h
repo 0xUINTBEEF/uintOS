@@ -146,21 +146,33 @@ extern struct uintos_tss uintos_init_tss;
 #define TASK_PRIV_SYSTEM     2       // System services (ring 2)
 #define TASK_PRIV_USER       3       // User applications (ring 3)
 
-// Enhanced task structure with security attributes
+// Enhanced task structure with new scheduler fields
 typedef struct {
     int id;                          // Task ID
     unsigned int state;              // Current state (UNUSED, READY, RUNNING, etc.)
     unsigned int flags;              // Task flags (SYSTEM, USER, etc.)
     unsigned int privilege_level;    // Privilege level (0-3)
+    unsigned int priority;           // Task priority (0-31, 0 is highest)
+    int time_slice;                  // Current time slice remaining
     unsigned int stack_size;         // Size of the task's stack
     char name[64];                   // Task name
     void* stack;                     // Task stack
     void* entry_point;               // Task entry point
+    void* kernel_stack;              // Kernel stack for when task is in kernel mode
+    void* user_stack;                // User stack for when task is in user mode
     uint32_t cr3;                    // Page directory physical address
+    uint32_t esp;                    // Current stack pointer
+    uint32_t ebp;                    // Current base pointer
+    uint32_t eip;                    // Current instruction pointer
+    struct uintos_tss* tss;          // Task state segment
     security_token_t* security_token;// Security token for the task
     security_descriptor_t* security_descriptor; // Security descriptor for access control
     int exit_code;                   // Task exit code
     int parent_id;                   // Parent task ID
+    uint64_t cpu_time_used;          // Total CPU time used by this task
+    uint64_t creation_time;          // Time when the task was created
+    uint64_t last_run_time;          // Last time this task was scheduled
+    void* context;                   // Task context for context switching
 } task_t;
 
 // Task information structure for status reporting
@@ -169,12 +181,24 @@ typedef struct {
     unsigned int state;      // Current state
     unsigned int flags;      // Task flags
     unsigned int privilege_level; // Privilege level (0-3)
+    unsigned int priority;   // Task priority
     unsigned int stack_size; // Size of the task's stack
     char name[64];           // Task name
     int is_current;          // Whether this is the currently running task
     int parent_id;           // Parent task ID
     security_sid_t user_sid; // User SID from security token
+    uint64_t cpu_time_used;  // Total CPU time used
+    uint64_t uptime;         // Time since task creation
 } task_info_t;
+
+// Context structure for task switching
+typedef struct {
+    uint32_t edi;
+    uint32_t esi;
+    uint32_t ebx;
+    uint32_t ebp;
+    uint32_t eip;
+} task_context_t;
 
 // Enhanced task management APIs
 void set_task_name(int task_id, const char *name);
@@ -182,7 +206,10 @@ const char *get_task_name(int task_id);
 int get_task_count(void);
 int get_current_task_id(void);
 int get_task_info(int task_id, task_info_t *info);
+
+// Task creation APIs integrated with scheduler
 int create_named_task(void (*entry_point)(), const char *name);
+int create_task_with_priority(void (*entry_point)(), const char *name, unsigned int priority);
 
 // Security-enhanced task management APIs
 int create_secure_task(void (*entry_point)(), const char *name, unsigned int flags, unsigned int privilege_level);
@@ -199,10 +226,18 @@ int get_task_exit_code(int task_id, int* exit_code);
 int wait_for_task(int task_id);
 int create_user_mode_task(void (*entry_point)(), const char* name, size_t stack_size);
 
-// Basic task management functions for the simple scheduler
-void create_task(void (*entry_point)());
-void switch_task();
-void initialize_multitasking();
+// New task APIs for improved kernel integration
+void task_yield(void);
+int task_sleep(unsigned int ms);
+int task_set_priority(int task_id, unsigned int priority);
+unsigned int task_get_priority(int task_id);
+int task_block(int task_id);
+int task_unblock(int task_id);
+
+// Internal task management functions
+void task_setup_context(task_t* task);
+void task_switch_to(task_t* task);
+void initialize_multitasking(void);
 void set_task_switching(unsigned int enabled);
 
 #define UINTOS_INIT_TASK(name) name ## _init()
