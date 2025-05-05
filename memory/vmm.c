@@ -661,10 +661,29 @@ static void vmm_default_page_fault_handler(uint32_t address, uint32_t error_code
     
     log_error("Unhandled page fault at 0x%08x", address);
     
-    // In a real OS, we would kill the process here
-    // Since we're a kernel, just halt
-    while (1) {
-        asm volatile("hlt");
+    // Proper process termination for unhandled page faults
+    if (process_is_running()) {
+        // Get current process information
+        process_t* current = process_current();
+        log_error("Terminating process %d (%s) due to unhandled page fault", 
+                 current->pid, current->name);
+        
+        // Create a core dump file for debugging (if filesystem is available)
+        if (fs_is_available()) {
+            char dump_filename[64];
+            snprintf(dump_filename, sizeof(dump_filename), "/var/crash/core.%d", current->pid);
+            process_create_core_dump(current, dump_filename);
+            log_info("Core dump created at %s", dump_filename);
+        }
+        
+        // Terminate the process
+        process_exit(PROCESS_EXIT_SEGFAULT);
+        
+        // Return to scheduler to run next process
+        scheduler_yield();
+    } else {
+        // If no process context, this is a kernel fault - panic
+        panic("Unhandled kernel page fault at 0x%08x", address);
     }
 }
 

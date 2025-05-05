@@ -47,15 +47,21 @@ static int vga_current_terminal = 0;
 // Utility function for delay using the PIT
 static void delay(int ms) {
     // Use PIT (Programmable Interval Timer) for more accurate timing
-    // This is a better implementation than busy waiting
+    // This is a proper implementation using a sleep function
     uint32_t start_tick = log_timestamp;
     uint32_t target_ticks = ms / 10; // Assuming 100Hz timer (10ms per tick)
     
     if (target_ticks == 0) target_ticks = 1; // At least one tick
     
     while ((log_timestamp - start_tick) < target_ticks) {
-        // Yield CPU - in a real OS this would use a proper sleep function
-        asm volatile("hlt");
+        // Use proper sleep function instead of busy waiting
+        if (thread_current() != NULL) {
+            // If we're in a threaded context, yield to other threads
+            thread_sleep(ms);
+        } else {
+            // Otherwise, halt the CPU until the next interrupt
+            asm volatile("sti; hlt");
+        }
     }
 }
 
@@ -91,12 +97,23 @@ void vga_init() {
 // Initialize triple buffering support
 void vga_init_triple_buffer() {
     // Allocate memory for the back and working buffers
-    // In a real OS, this would use proper memory allocation
-    static uint16_t back_buffer_memory[VGA_BUFFER_SIZE];
-    static uint16_t working_buffer_memory[VGA_BUFFER_SIZE];
+    // Use proper memory allocation from the kernel heap
+    vga_back_buffer = (uint16_t*)kmalloc(VGA_BUFFER_SIZE);
+    vga_working_buffer = (uint16_t*)kmalloc(VGA_BUFFER_SIZE);
     
-    vga_back_buffer = back_buffer_memory;
-    vga_working_buffer = working_buffer_memory;
+    if (!vga_back_buffer || !vga_working_buffer) {
+        if (vga_back_buffer) kfree(vga_back_buffer);
+        if (vga_working_buffer) kfree(vga_working_buffer);
+        
+        // Fallback to static allocation if dynamic allocation fails
+        static uint16_t back_buffer_memory[VGA_BUFFER_SIZE];
+        static uint16_t working_buffer_memory[VGA_BUFFER_SIZE];
+        
+        vga_back_buffer = back_buffer_memory;
+        vga_working_buffer = working_buffer_memory;
+        
+        log_warning("VGA", "Failed to allocate triple buffer memory, using static fallback");
+    }
     
     // Copy the current screen to the back buffer
     vga_capture_screen(vga_back_buffer);
@@ -793,9 +810,15 @@ void vga_init_virtual_terminals() {
     // Allocate memory for each terminal buffer
     for (int i = 0; i < VGA_MAX_VIRTUAL_TERMINALS; i++) {
         if (!vga_terminal_buffers[i]) {
-            // In a real OS, this would use proper memory allocation
-            static uint16_t terminal_buffers[VGA_MAX_VIRTUAL_TERMINALS][VGA_WIDTH * VGA_HEIGHT];
-            vga_terminal_buffers[i] = terminal_buffers[i];
+            // Allocate memory from the kernel heap
+            vga_terminal_buffers[i] = (uint16_t*)kmalloc(VGA_WIDTH * VGA_HEIGHT * sizeof(uint16_t));
+            
+            // If allocation fails, use static fallback
+            if (!vga_terminal_buffers[i]) {
+                static uint16_t static_terminal_buffers[VGA_MAX_VIRTUAL_TERMINALS][VGA_WIDTH * VGA_HEIGHT];
+                vga_terminal_buffers[i] = static_terminal_buffers[i];
+                log_warning("VGA", "Failed to allocate memory for terminal %d, using static fallback", i);
+            }
             
             // Initialize each terminal with clear screen
             for (int j = 0; j < VGA_WIDTH * VGA_HEIGHT; j++) {

@@ -59,8 +59,15 @@ static char* format_timestamp(uint32_t timestamp, char* buffer) {
 
 // Get current system time in timer ticks (100Hz)
 static uint32_t get_system_time() {
-    // This would use a proper system timer in a real OS
-    return log_timestamp;
+    // Use the system's hardware timer
+    // This implementation uses a proper system timer instead of a simple counter
+    if (timer_get_ticks_available()) {
+        // Return the actual system timer value if available
+        return timer_get_ticks();
+    } else {
+        // Fall back to the simpler counter if the timer isn't initialized yet
+        return log_timestamp;
+    }
 }
 
 int log_init(log_level_t log_level, uint8_t destinations, uint8_t format_options) {

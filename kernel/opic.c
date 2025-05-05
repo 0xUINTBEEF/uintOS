@@ -250,8 +250,8 @@ int opic_eoi(uint8_t source_num) {
     // This implementation assumes a simple offset for each CPU's EOI register
     // In a real implementation, this would be based on the CPU's register region
     
-    // Get current CPU ID (in a real OS, this would use a proper CPU ID function)
-    uint8_t current_cpu = 0; // Assume CPU 0 for simplicity
+    // Get current CPU ID using proper CPU identification
+    uint8_t current_cpu = cpu_get_id();
     
     // Calculate EOI register for this CPU
     uint32_t eoi_reg = 0x40000 + (current_cpu * 0x1000) + 0x80;
@@ -338,8 +338,35 @@ int opic_get_current_vector(uint8_t cpu) {
  * This should be called when an unexpected interrupt occurs
  */
 void opic_spurious_handler(void) {
-    // Handle spurious interrupt
-    // In a real OS, this might log the event or take other action
+    // Handle spurious interrupt with proper logging and stats tracking
+    static uint32_t spurious_count = 0;
+    spurious_count++;
+    
+    // Get CPU and interrupt information for diagnostic purposes
+    uint8_t cpu_id = cpu_get_id();
+    uint32_t eflags = cpu_get_eflags();
+    uint32_t curr_vector = opic_get_current_vector(cpu_id);
+    
+    // Log the spurious interrupt with detailed information
+    log_warning("OPIC", "Spurious interrupt #%u on CPU %u, vector=0x%x, eflags=0x%08x", 
+               spurious_count, cpu_id, curr_vector, eflags);
+    
+    // Check if this is becoming a problem (many spurious interrupts)
+    if (spurious_count > 100) {
+        log_error("OPIC", "High rate of spurious interrupts (%u) - possible hardware issue", 
+                 spurious_count);
+        
+        // Reset the counter to avoid flooding logs
+        spurious_count = 0;
+        
+        // Consider resetting the OPIC controller if this becomes a recurring issue
+        if (spurious_count % 1000 == 0) {
+            log_warning("OPIC", "Attempting OPIC controller reset due to excessive spurious interrupts");
+            uint32_t global_config = opic_read_reg(OPIC_GLOBAL_CONFIG);
+            global_config |= OPIC_GLOBAL_RESET;
+            opic_write_reg(OPIC_GLOBAL_CONFIG, global_config);
+        }
+    }
     
     // No EOI is needed for spurious interrupts
 }
