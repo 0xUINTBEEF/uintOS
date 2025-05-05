@@ -138,22 +138,36 @@ boot_start:
     call setup_gdt
     
     ; Switch to protected mode
-    cli
-    mov eax, cr0
-    or eax, 1
-    mov cr0, eax
-    jmp clear_cache
+    cli                             ; Disable interrupts
+    mov eax, cr0                    ; Get current CR0
+    or eax, 1                       ; Set PE bit (bit 0)
+    mov cr0, eax                    ; Enter protected mode
+    
+    ; Far jump to clear the instruction pipeline and load CS with 32-bit selector
+    jmp 0x08:protected_mode_entry   ; 0x08 is the code segment selector
 
-clear_cache:
+; 32-bit protected mode code starts here
+[BITS 32]
+protected_mode_entry:
     ; Set up segment registers for protected mode
-    mov eax, 0x10
-    mov ss, [init_tss + ss]
-    mov esp, [init_tss + esp0]
-    push dword [init_tss + eflags]
-    push dword [init_tss + cs]
-    push dword [init_tss + eip]
-    call 0x18:00   ; Far jump to TSS selector
+    mov ax, 0x10                    ; Data segment selector (0x10)
+    mov ds, ax
+    mov es, ax
+    mov fs, ax
+    mov gs, ax
+    mov ss, ax
+    
+    ; Set up stack
+    mov esp, 0x10000                ; Set stack pointer to a safe location
+    
+    ; Load TSS
+    mov ax, 0x18                    ; TSS selector (0x18)
+    ltr ax
+    
+    ; Jump to kernel entry point
+    jmp 0x1000                      ; Jump to the loaded kernel entry point
 
+    ; Should never reach here
     cli
     hlt
 
