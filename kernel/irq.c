@@ -517,9 +517,23 @@ void uintos_handle_double_fault(uint32_t error_code) {
     
     if (exception_handlers[EXC_DOUBLE_FAULT]) {
         exception_handlers[EXC_DOUBLE_FAULT](error_code, NULL);
+    } else {
+        // Use the kernel panic system for double faults
+        // Include panic.h at the top of the file
+        #include "panic.h"
+        
+        // Trigger kernel panic with double fault type
+        PANIC(PANIC_DOUBLE_FAULT, 
+              "A double fault has occurred (error code: 0x%x). "
+              "This indicates that the system encountered a serious error while "
+              "attempting to handle another exception.", 
+              error_code);
+        
+        // This code is never reached due to the panic
     }
     
-    // In a production OS, we might log this and halt the system
+    // In a production OS, we would halt the system
+    // This is also never reached due to the above PANIC call
     UINTOS_INTERRUPT_RETURN();
 }
 UINTOS_TASK_END(uintos_irq8);
@@ -709,102 +723,120 @@ void uintos_handle_page_fault(uint32_t error_code) {
         // Pass faulting address in context
         exception_handlers[EXC_PAGE_FAULT](error_code, (void*)faulting_address);
     } else {
-        // Enhanced default handler with detailed diagnostic information
-        uint8_t old_color = vga_current_color;
-        vga_set_color(vga_entry_color(VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK));
+        // Include panic.h
+        #include "panic.h"
         
-        vga_write_string("\nCPU EXCEPTION: Page Fault\n");
+        // Determine if this is a critical page fault that should cause a kernel panic
+        int is_critical = 0;
+        char fault_details[256] = {0};
         
-        // Convert faulting address to string
-        char addr_str[9];
-        for (int i = 0; i < 8; i++) {
-            uint8_t nibble = (faulting_address >> ((7-i) * 4)) & 0xF;
-            addr_str[i] = (nibble < 10) ? ('0' + nibble) : ('A' + nibble - 10);
+        // Null pointer dereference
+        if (faulting_address < 0x1000) {
+            is_critical = 1;
+            strcat(fault_details, "Null pointer dereference");
+        } 
+        // Kernel address space violation
+        else if ((error_code & 0x04) && (faulting_address >= 0xC0000000)) { 
+            is_critical = 1;
+            strcat(fault_details, "User mode access to kernel memory");
         }
-        addr_str[8] = 0;
+        // Reserved bits violation
+        else if (error_code & 0x08) {
+            is_critical = 1;
+            strcat(fault_details, "Reserved bits set in page table");
+        }
+        // Stack overflow detection (simplified)
+        else if ((error_code & 0x02) && (faulting_address >= 0xBFFFF000)) {
+            is_critical = 1;
+            strcat(fault_details, "Possible stack overflow");
+        }
         
-        vga_write_string("Faulting Address: 0x");
-        vga_write_string(addr_str);
-        vga_write_string("\n");
-        
-        // Decode and display error code information
-        vga_write_string("Fault Details: ");
+        // Build detailed error description
+        strcat(fault_details, is_critical ? ". " : " or ");
         
         if (error_code & 0x01) {
-            vga_write_string("Page Protection Violation");
+            strcat(fault_details, "Page protection violation");
         } else {
-            vga_write_string("Non-present Page");
+            strcat(fault_details, "Non-present page");
         }
         
-        vga_write_string(", ");
+        strcat(fault_details, ", ");
         if (error_code & 0x02) {
-            vga_write_string("Write Operation");
+            strcat(fault_details, "write operation");
         } else {
-            vga_write_string("Read Operation");
-        }
-        
-        vga_write_string(", ");
-        if (error_code & 0x04) {
-            vga_write_string("User-Mode Access");
-        } else {
-            vga_write_string("Supervisor-Mode Access");
-        }
-        
-        if (error_code & 0x08) {
-            vga_write_string(", Reserved Bits Set");
+            strcat(fault_details, "read operation");
         }
         
         if (error_code & 0x10) {
-            vga_write_string(", Instruction Fetch");
+            strcat(fault_details, ", during instruction fetch");
         }
         
-        vga_write_string("\n");
-        
-        // Get instruction pointer and code segment from the stack
-        uint32_t eip, cs;
-        asm volatile(
-            "mov %0, [esp + 8]\n\t"  // EIP is at esp+8
-            "mov %1, [esp + 12]"     // CS is at esp+12
-            : "=r"(eip), "=r"(cs)
-            : : "memory"
-        );
-        
-        // Display code address info
-        vga_write_string("Code Location: 0x");
-        char eip_str[9];
-        for (int i = 0; i < 8; i++) {
-            uint8_t nibble = (eip >> ((7-i) * 4)) & 0xF;
-            eip_str[i] = (nibble < 10) ? ('0' + nibble) : ('A' + nibble - 10);
-        }
-        eip_str[8] = 0;
-        vga_write_string(eip_str);
-        
-        vga_write_string(" in segment 0x");
-        char cs_str[5];
-        for (int i = 0; i < 4; i++) {
-            uint8_t nibble = (cs >> ((3-i) * 4)) & 0xF;
-            cs_str[i] = (nibble < 10) ? ('0' + nibble) : ('A' + nibble - 10);
-        }
-        cs_str[4] = 0;
-        vga_write_string(cs_str);
-        vga_write_string("\n");
-        
-        // Provide potential causes based on error code
-        vga_write_string("\nPossible causes:\n");
-        if (!(error_code & 0x01)) {
-            vga_write_string("- Memory page not mapped (null pointer?)\n");
-            vga_write_string("- Accessing unmapped virtual address\n");
+        // For critical page faults, trigger kernel panic
+        if (is_critical) {
+            // Get instruction pointer from the stack
+            uint32_t eip;
+            asm volatile("mov %0, [esp + 8]" : "=r"(eip) : : "memory");
+            
+            PANIC(PANIC_PAGE_FAULT, 
+                  "Fatal page fault at address 0x%08x (EIP: 0x%08x). %s", 
+                  faulting_address, eip, fault_details);
+            // Never returns
         } else {
-            vga_write_string("- Insufficient privileges for memory access\n");
-            vga_write_string("- Writing to read-only page\n");
+            // Enhanced default handler with detailed diagnostic information
+            uint8_t old_color = vga_current_color;
+            vga_set_color(vga_entry_color(VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK));
+            
+            vga_write_string("\nCPU EXCEPTION: Page Fault\n");
+            
+            // Convert faulting address to string
+            char addr_str[9];
+            for (int i = 0; i < 8; i++) {
+                uint8_t nibble = (faulting_address >> ((7-i) * 4)) & 0xF;
+                addr_str[i] = (nibble < 10) ? ('0' + nibble) : ('A' + nibble - 10);
+            }
+            addr_str[8] = 0;
+            
+            vga_write_string("Faulting Address: 0x");
+            vga_write_string(addr_str);
+            vga_write_string("\n");
+            
+            // Display fault details
+            vga_write_string("Fault Details: ");
+            vga_write_string(fault_details);
+            vga_write_string("\n");
+            
+            // Get instruction pointer and code segment from the stack
+            uint32_t eip, cs;
+            asm volatile(
+                "mov %0, [esp + 8]\n\t"  // EIP is at esp+8
+                "mov %1, [esp + 12]"     // CS is at esp+12
+                : "=r"(eip), "=r"(cs)
+                : : "memory"
+            );
+            
+            // Display code address info
+            vga_write_string("Code Location: 0x");
+            char eip_str[9];
+            for (int i = 0; i < 8; i++) {
+                uint8_t nibble = (eip >> ((7-i) * 4)) & 0xF;
+                eip_str[i] = (nibble < 10) ? ('0' + nibble) : ('A' + nibble - 10);
+            }
+            eip_str[8] = 0;
+            vga_write_string(eip_str);
+            
+            vga_write_string(" in segment 0x");
+            char cs_str[5];
+            for (int i = 0; i < 4; i++) {
+                uint8_t nibble = (cs >> ((3-i) * 4)) & 0xF;
+                cs_str[i] = (nibble < 10) ? ('0' + nibble) : ('A' + nibble - 10);
+            }
+            cs_str[4] = 0;
+            vga_write_string(cs_str);
+            vga_write_string("\n");
+            
+            // Restore color
+            vga_set_color(old_color);
         }
-        
-        if (error_code & 0x08) {
-            vga_write_string("- Page table entry contains reserved bits set\n");
-        }
-        
-        // Restore color
-        vga_set_color(old_color);
     }
     
     UINTOS_INTERRUPT_RETURN();

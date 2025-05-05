@@ -29,5 +29,6 @@ void cmd_vgademo(int argc, char *argv[]);
 void cmd_log(int argc, char *argv[]); // New log command
 void cmd_usb(int argc, char *argv[]); // New USB devices command
 void cmd_taskman(int argc, char *argv[]); // New taskman command
+void cmd_panic(int argc, char *argv[]); // Kernel panic test command
 
 #endif // SHELL_H

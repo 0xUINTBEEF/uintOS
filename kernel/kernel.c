@@ -9,6 +9,7 @@
 #include "keyboard.h"
 #include "shell.h"
 #include "vga.h"
+#include "panic.h"  // Include the panic header
 #include "../filesystem/fat12.h"
 #include "../memory/paging.h"
 #include "../memory/heap.h"

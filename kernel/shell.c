@@ -465,6 +465,8 @@ void shell_execute_command(const char *command) {
             cmd_vm(argc, argv);  // VM management command
         } else if (strcmp(argv[0], "gui") == 0) {
             cmd_gui(argc, argv);  // New GUI command
+        } else if (strcmp(argv[0], "panic") == 0) {
+            cmd_panic(argc, argv);  // Kernel panic test command
         } else {
             log_warning("SHELL", "Unknown command: %s", argv[0]);
             shell_println("Unknown command. Type 'help' for a list of commands.");
@@ -501,6 +503,8 @@ void cmd_help(int argc, char *argv[]) {
     shell_println("  wdm      - Windows driver management");
     shell_println("  usb      - USB subsystem management");
     shell_println("  vm       - Manage virtual machines");
+    shell_println("  gui      - Graphical user interface commands");
+    shell_println("  panic    - Test kernel panic handling (WARNING: crashes system)");
 }
 
 void cmd_clear(int argc, char *argv[]) {
@@ -3003,5 +3007,96 @@ void cmd_gui(int argc, char *argv[]) {
     }
     else {
         shell_println("Unknown GUI command. Try 'gui' for help.");
+    }
+}
+
+// Kernel panic test command implementation
+void cmd_panic(int argc, char *argv[]) {
+    #include "panic.h"
+    
+    if (argc < 2) {
+        shell_println("Usage: panic <type>");
+        shell_println("Types:");
+        shell_println("  general       - General unspecified error");
+        shell_println("  memory        - Memory corruption");
+        shell_println("  pagefault     - Page fault");
+        shell_println("  doublefault   - Double fault");
+        shell_println("  stackoverflow - Stack overflow");
+        shell_println("  divzero       - Division by zero");
+        shell_println("  assert        - Assertion failure");
+        shell_println("  hardware      - Hardware failure");
+        shell_println("  driver        - Driver error");
+        shell_println("  irq           - Unexpected interrupt");
+        shell_println("  fs            - Filesystem error");
+        shell_println("");
+        shell_println("WARNING: This command will intentionally crash the system.");
+        shell_println("It is intended for testing the kernel panic handler.");
+        return;
+    }
+    
+    // Confirmation prompt
+    shell_println("WARNING: This will cause a kernel panic and halt the system.");
+    shell_print("Are you sure you want to continue? (y/N) ");
+    
+    // Wait for a response
+    while (!is_key_available()) {}
+    
+    char key = keyboard_read_key();
+    shell_print(&key);
+    shell_println("");
+    
+    if (key != 'y' && key != 'Y') {
+        shell_println("Panic test aborted.");
+        return;
+    }
+    
+    // Small delay to allow messages to be seen
+    for (volatile int i = 0; i < 500000; i++) {}
+    
+    // Determine which type of panic to trigger
+    const char* type = argv[1];
+    
+    if (strcmp(type, "general") == 0) {
+        PANIC(PANIC_GENERAL, "Manual panic triggered for testing");
+    }
+    else if (strcmp(type, "memory") == 0) {
+        PANIC(PANIC_MEMORY_CORRUPTION, "Simulating memory corruption for testing");
+    }
+    else if (strcmp(type, "pagefault") == 0) {
+        PANIC(PANIC_PAGE_FAULT, "Simulating a page fault for testing");
+    }
+    else if (strcmp(type, "doublefault") == 0) {
+        PANIC(PANIC_DOUBLE_FAULT, "Simulating a double fault for testing");
+    }
+    else if (strcmp(type, "stackoverflow") == 0) {
+        PANIC(PANIC_STACK_OVERFLOW, "Simulating a stack overflow for testing");
+    }
+    else if (strcmp(type, "divzero") == 0) {
+        // Actually cause a division by zero
+        shell_println("Causing a real division by zero...");
+        for (volatile int i = 0; i < 100000; i++) {} // Delay
+        int x = 0;
+        int y = 100 / x; // This will cause a real division by zero
+        shell_println("This should not be printed");
+    }
+    else if (strcmp(type, "assert") == 0) {
+        // Trigger an assertion failure
+        shell_println("Triggering assertion failure...");
+        ASSERT(0 == 1);
+    }
+    else if (strcmp(type, "hardware") == 0) {
+        PANIC(PANIC_HARDWARE_FAILURE, "Simulating a hardware failure for testing");
+    }
+    else if (strcmp(type, "driver") == 0) {
+        PANIC(PANIC_DRIVER_ERROR, "Simulating a driver error for testing");
+    }
+    else if (strcmp(type, "irq") == 0) {
+        PANIC(PANIC_UNEXPECTED_IRQ, "Simulating an unexpected interrupt for testing");
+    }
+    else if (strcmp(type, "fs") == 0) {
+        PANIC(PANIC_FS_ERROR, "Simulating a filesystem error for testing");
+    }
+    else {
+        shell_println("Unknown panic type. Run 'panic' without arguments for usage.");
     }
 }
