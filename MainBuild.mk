@@ -14,25 +14,22 @@ LD = $(CROSS_COMPILE)ld
 FILESYSTEM_DIR := filesystem
 MEMORY_DIR := memory
 
+.PHONY: all build_dir disk qemu-gdb clean
+
 include $(FILESYSTEM_DIR)/FileSystemBuild.mk
 include $(MEMORY_DIR)/MemoryBuild.mk
 
 all: build_dir disk
 
 build_dir:
-	[ -d build/ ] || mkdir build
-	[ -d build/kern ] || mkdir build/kern
-	[ -d build/boot ] || mkdir build/boot
+	mkdir -p build/kern build/boot
 
-.PHONY:
 $(BOOTLOADER):
 	make -f bootloader/BootBuild.mk -C bootloader CROSS_COMPILE=$(CROSS_COMPILE)
 
-.PHONY:
 $(KERNEL):
 	make -f kernel/KernelBuild.mk -C kernel CROSS_COMPILE=$(CROSS_COMPILE)
 
-.PHONY:
 disk: $(BOOTLOADER) $(KERNEL)
 	make -f bootloader/BootBuild.mk -C bootloader CROSS_COMPILE=$(CROSS_COMPILE)
 	make -f kernel/KernelBuild.mk -C kernel CROSS_COMPILE=$(CROSS_COMPILE)
@@ -43,7 +40,6 @@ disk: $(BOOTLOADER) $(KERNEL)
 qemu-gdb:
 	qemu-system-i386 $(QEMU_DEBUG) $(QEMU_STDIO) -machine q35 -fda $(DISK_IMG)  -gdb tcp::26000 -D qemu.log -S
 
-.PHONY:
 clean:
 	killall qemu-system-i386 || true
 	killall gdb || true

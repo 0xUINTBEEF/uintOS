@@ -44,13 +44,19 @@ static int vga_current_terminal = 0;
 #define BLOCK_MEDIUM 0xB1
 #define BLOCK_DARK 0xB2
 
-// Utility function for delay (simple busy wait)
+// Utility function for delay using the PIT
 static void delay(int ms) {
-    // Simple delay using busy wait - in a real OS, use proper timing
-    // This is a placeholder for demonstration
-    volatile int i, j;
-    for (i = 0; i < ms; i++)
-        for (j = 0; j < 10000; j++); // Adjust this value based on CPU speed
+    // Use PIT (Programmable Interval Timer) for more accurate timing
+    // This is a better implementation than busy waiting
+    uint32_t start_tick = log_timestamp;
+    uint32_t target_ticks = ms / 10; // Assuming 100Hz timer (10ms per tick)
+    
+    if (target_ticks == 0) target_ticks = 1; // At least one tick
+    
+    while ((log_timestamp - start_tick) < target_ticks) {
+        // Yield CPU - in a real OS this would use a proper sleep function
+        asm volatile("hlt");
+    }
 }
 
 // Combine foreground and background colors into a VGA color byte

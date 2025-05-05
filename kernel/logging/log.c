@@ -1,6 +1,7 @@
 #include "log.h"
 #include "../vga.h"
 #include "../io.h"
+#include "../sync.h" // Include synchronization primitives
 #include <stdarg.h>
 #include <string.h>
 #include <stdio.h>
@@ -10,6 +11,7 @@ static log_level_t current_log_level = LOG_LEVEL_INFO;
 static uint8_t log_destinations = LOG_DEST_SCREEN | LOG_DEST_MEMORY;
 static uint8_t log_format_options = LOG_FORMAT_LEVEL | LOG_FORMAT_SOURCE;
 static uint32_t log_timestamp = 0;
+static mutex_t log_mutex; // Mutex for thread-safe logging
 
 /* Log buffer */
 static char log_buffer[LOG_BUFFER_SIZE];
@@ -55,10 +57,19 @@ static char* format_timestamp(uint32_t timestamp, char* buffer) {
     return buffer;
 }
 
+// Get current system time in timer ticks (100Hz)
+static uint32_t get_system_time() {
+    // This would use a proper system timer in a real OS
+    return log_timestamp;
+}
+
 int log_init(log_level_t log_level, uint8_t destinations, uint8_t format_options) {
     current_log_level = log_level;
     log_destinations = destinations;
     log_format_options = format_options;
+    
+    // Initialize the mutex for thread safety
+    mutex_init(&log_mutex);
     
     // Clear log buffer
     memset(log_buffer, 0, LOG_BUFFER_SIZE);
@@ -74,6 +85,9 @@ void log_message(log_level_t level, const char* source, const char* format, ...)
     if (level < current_log_level) {
         return; // Skip this message if below the current log level
     }
+    
+    // Acquire the mutex for thread safety
+    mutex_lock(&log_mutex);
     
     char message[LOG_MAX_MESSAGE_SIZE];
     va_list args;
@@ -91,7 +105,7 @@ void log_message(log_level_t level, const char* source, const char* format, ...)
     
     // Add timestamp if enabled
     if (log_format_options & LOG_FORMAT_TIMESTAMP) {
-        format_timestamp(log_timestamp++, timestamp_str);
+        format_timestamp(get_system_time(), timestamp_str);
         strcat(full_message, "[");
         strcat(full_message, timestamp_str);
         strcat(full_message, "] ");
@@ -139,11 +153,22 @@ void log_message(log_level_t level, const char* source, const char* format, ...)
             log_buffer[log_buffer_position++] = '\n';
             log_buffer[log_buffer_position] = '\0';
         } else {
-            // Buffer is full, replace last message with warning
-            const char* overflow_msg = "[LOGGING] Log buffer overflow, oldest messages lost";
+            // Buffer is full, implement circular buffer behavior
+            // Move old messages to make room for new message
+            uint32_t move_size = log_buffer_position - (LOG_BUFFER_SIZE / 2);
+            memmove(log_buffer, log_buffer + move_size, LOG_BUFFER_SIZE - move_size);
+            log_buffer_position -= move_size;
             
-            // Copy overflow message
-            strcpy(&log_buffer[log_buffer_position - message_length - 1], overflow_msg);
+            // Add the warning about lost messages
+            const char* overflow_msg = "[LOGGING] Log buffer overflow, oldest messages lost\n";
+            strcpy(&log_buffer[log_buffer_position], overflow_msg);
+            log_buffer_position += strlen(overflow_msg);
+            
+            // Now add the new message
+            strcpy(&log_buffer[log_buffer_position], full_message);
+            log_buffer_position += message_length;
+            log_buffer[log_buffer_position++] = '\n';
+            log_buffer[log_buffer_position] = '\0';
         }
     }
     
@@ -157,27 +182,39 @@ void log_message(log_level_t level, const char* source, const char* format, ...)
         outb(0x3F8, '\r');
         outb(0x3F8, '\n');
     }
+    
+    // Update the timestamp counter
+    log_timestamp++;
+    
+    // Release the mutex
+    mutex_unlock(&log_mutex);
 }
 
 void log_set_level(log_level_t level) {
     if (level <= LOG_LEVEL_EMERGENCY) {
+        mutex_lock(&log_mutex);
         log_debug("LOG", "Changing log level from %s to %s", 
                  log_level_to_string(current_log_level),
                  log_level_to_string(level));
         current_log_level = level;
+        mutex_unlock(&log_mutex);
     }
 }
 
 void log_set_destinations(uint8_t destinations) {
+    mutex_lock(&log_mutex);
     log_debug("LOG", "Changing log destinations from 0x%x to 0x%x", 
              log_destinations, destinations);
     log_destinations = destinations;
+    mutex_unlock(&log_mutex);
 }
 
 void log_set_format_options(uint8_t format_options) {
+    mutex_lock(&log_mutex);
     log_debug("LOG", "Changing log format options from 0x%x to 0x%x", 
              log_format_options, format_options);
     log_format_options = format_options;
+    mutex_unlock(&log_mutex);
 }
 
 uint32_t log_get_buffer(char* buffer, uint32_t max_size) {
@@ -185,22 +222,27 @@ uint32_t log_get_buffer(char* buffer, uint32_t max_size) {
         return 0;
     }
     
+    mutex_lock(&log_mutex);
     uint32_t bytes_to_copy = (log_buffer_position < max_size) ? 
                              log_buffer_position : max_size - 1;
     
     memcpy(buffer, log_buffer, bytes_to_copy);
     buffer[bytes_to_copy] = '\0'; // Ensure null termination
+    mutex_unlock(&log_mutex);
     
     return bytes_to_copy;
 }
 
 void log_clear_buffer(void) {
+    mutex_lock(&log_mutex);
     log_debug("LOG", "Clearing log buffer");
     memset(log_buffer, 0, LOG_BUFFER_SIZE);
     log_buffer_position = 0;
+    mutex_unlock(&log_mutex);
 }
 
 void log_dump_buffer(void) {
+    mutex_lock(&log_mutex);
     uint8_t old_color = vga_current_color;
     vga_set_color(vga_entry_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK));
     
@@ -209,6 +251,7 @@ void log_dump_buffer(void) {
     vga_write_string("--- END OF LOG BUFFER ---\n");
     
     vga_set_color(old_color);
+    mutex_unlock(&log_mutex);
 }
 
 const char* log_level_to_string(log_level_t level) {

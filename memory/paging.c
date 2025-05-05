@@ -1,5 +1,6 @@
 #include "paging.h"
 #include "../kernel/logging/log.h"
+#include "../kernel/sync.h" // Add synchronization support
 #include <stdint.h>
 #include <string.h>
 
@@ -28,9 +29,10 @@ static uint32_t* current_page_directory = NULL;
 static page_info_t* page_info_array = NULL;
 static uint32_t total_pages = 0;
 static uint32_t free_pages = 0;
+static mutex_t paging_mutex; // Mutex for thread-safe memory operations
 
 // Memory protection
-#define MAX_PROTECTED_REGIONS 16
+#define MAX_PROTECTED_REGIONS 32  // Increased from 16
 
 typedef struct {
     void* start;
@@ -49,6 +51,9 @@ static struct {
     uint32_t address_space_switches;
     uint32_t page_faults;
     uint32_t tlb_flushes;
+    uint32_t cow_faults_handled;
+    uint32_t demand_pages_loaded;
+    uint32_t memory_mapped_regions;
 } memory_stats = {0};
 
 // Forward declarations of helper functions
@@ -61,12 +66,15 @@ static int handle_page_fault(void* fault_addr, int is_write, int is_user);
  * Initialize the paging subsystem with improved memory management
  */
 void paging_init() {
+    // Initialize the mutex for thread-safety
+    mutex_init(&paging_mutex);
+    
     // Get memory size from the bootloader information
     extern uint32_t _bootinfo_memsize;
     total_pages = _bootinfo_memsize / PAGE_SIZE;
     free_pages = total_pages;
     
-    log_info("Paging: Initializing with %u KB total memory (%u pages)", 
+    log_info("PAGING", "Initializing with %u KB total memory (%u pages)", 
              total_pages * (PAGE_SIZE / 1024), total_pages);
     
     // Allocate space for page tracking information
@@ -133,13 +141,16 @@ void paging_init() {
     cr0 |= 0x80000000; // Enable paging bit
     asm volatile("movl %0, %%cr0" : : "r"(cr0));
     
-    log_info("Paging: Successfully enabled with %u free pages", free_pages);
+    log_info("PAGING", "Successfully enabled with %u free pages", free_pages);
 }
 
 /**
  * Allocate a single page with improved tracking
  */
 void* allocate_page() {
+    // Thread safety
+    mutex_lock(&paging_mutex);
+    
     // Find a free page
     for (uint32_t i = 0; i < total_pages; i++) {
         if (page_info_array[i].state == PAGE_FREE) {
@@ -161,11 +172,13 @@ void* allocate_page() {
             void* page = (void*)(i * PAGE_SIZE);
             memset(page, 0, PAGE_SIZE);
             
+            mutex_unlock(&paging_mutex);
             return page;
         }
     }
     
-    log_error("Paging: Failed to allocate page, out of memory!");
+    log_error("PAGING", "Failed to allocate page, out of memory!");
+    mutex_unlock(&paging_mutex);
     return NULL; // Out of memory
 }
 
@@ -173,23 +186,36 @@ void* allocate_page() {
  * Free a previously allocated page with reference counting
  */
 void free_page(void* page) {
+    mutex_lock(&paging_mutex);
+    
     uint32_t page_index = (uint32_t)page / PAGE_SIZE;
     
     // Validate page address
     if (page_index >= total_pages) {
-        log_error("Paging: Attempt to free invalid page address %p", page);
+        log_error("PAGING", "Attempt to free invalid page address %p", page);
+        mutex_unlock(&paging_mutex);
         return;
     }
     
     // Check if page is already free
     if (page_info_array[page_index].state == PAGE_FREE) {
-        log_warning("Paging: Double free detected for page %p", page);
+        log_warning("PAGING", "Double free detected for page %p", page);
+        mutex_unlock(&paging_mutex);
+        return;
+    }
+    
+    // Check if this is a protected memory region
+    protected_region_t* region = get_protected_region(page);
+    if (region) {
+        log_warning("PAGING", "Attempt to free protected memory at %p (%s)", page, region->name);
+        mutex_unlock(&paging_mutex);
         return;
     }
     
     // Handle reference counting for shared pages
     if (page_info_array[page_index].references > 1) {
         page_info_array[page_index].references--;
+        mutex_unlock(&paging_mutex);
         return;
     }
     
@@ -204,6 +230,8 @@ void free_page(void* page) {
     
     // Zero out the page to prevent data leaks
     memset(page, 0, PAGE_SIZE);
+    
+    mutex_unlock(&paging_mutex);
 }
 
 /**
@@ -213,8 +241,11 @@ void* allocate_pages(uint32_t num) {
     if (num == 0) return NULL;
     if (num == 1) return allocate_page();
     
+    mutex_lock(&paging_mutex);
+    
     if (num > free_pages) {
-        log_error("Paging: Failed to allocate %u pages, only %u available", num, free_pages);
+        log_error("PAGING", "Failed to allocate %u pages, only %u available", num, free_pages);
+        mutex_unlock(&paging_mutex);
         return NULL;
     }
     
@@ -249,6 +280,8 @@ void* allocate_pages(uint32_t num) {
                 
                 void* result = (void*)(start_page * PAGE_SIZE);
                 memset(result, 0, num * PAGE_SIZE);
+                
+                mutex_unlock(&paging_mutex);
                 return result;
             }
         } else {
@@ -257,7 +290,8 @@ void* allocate_pages(uint32_t num) {
         }
     }
     
-    log_error("Paging: Failed to find %u contiguous pages", num);
+    log_error("PAGING", "Failed to find %u contiguous pages", num);
+    mutex_unlock(&paging_mutex);
     return NULL; // Couldn't find enough contiguous pages
 }
 
@@ -275,15 +309,26 @@ void free_pages(void* start, uint32_t num) {
  * Map a physical page to a virtual address with specific flags
  */
 int paging_map_page(void* physical, void* virtual, uint32_t flags) {
+    mutex_lock(&paging_mutex);
+    
     uint32_t pd_index = (uint32_t)virtual >> 22;
     uint32_t pt_index = ((uint32_t)virtual >> 12) & 0x3FF;
+    
+    // Check if this is a protected region
+    protected_region_t* region = get_protected_region(virtual);
+    if (region) {
+        log_warning("PAGING", "Attempt to map into protected region %s at %p", region->name, virtual);
+        mutex_unlock(&paging_mutex);
+        return -1;
+    }
     
     // Check if we need to create a new page table
     if (!(current_page_directory[pd_index] & PAGE_FLAG_PRESENT)) {
         // Allocate page table
-        void* pt_physical = allocate_page();
+        void* pt_physical = allocate_page(); // Already thread-safe
         if (!pt_physical) {
-            log_error("Paging: Failed to allocate page table for mapping %p->%p", physical, virtual);
+            log_error("PAGING", "Failed to allocate page table for mapping %p->%p", physical, virtual);
+            mutex_unlock(&paging_mutex);
             return -1;
         }
         
@@ -302,7 +347,7 @@ int paging_map_page(void* physical, void* virtual, uint32_t flags) {
     if (table->entries[pt_index] & PAGE_FLAG_PRESENT) {
         // If remapping with different physical address, log a warning
         if ((table->entries[pt_index] & ~0xFFF) != ((uint32_t)physical & ~0xFFF)) {
-            log_warning("Paging: Remapping virtual address %p from %p to %p", 
+            log_warning("PAGING", "Remapping virtual address %p from %p to %p", 
                       virtual, 
                       (void*)(table->entries[pt_index] & ~0xFFF), 
                       physical);
@@ -315,6 +360,7 @@ int paging_map_page(void* physical, void* virtual, uint32_t flags) {
     // Invalidate TLB entry for this virtual address
     flush_tlb_entry(virtual);
     
+    mutex_unlock(&paging_mutex);
     return 0;
 }
 
@@ -322,11 +368,22 @@ int paging_map_page(void* physical, void* virtual, uint32_t flags) {
  * Unmap a virtual address
  */
 void unmap_page(void* virtual) {
+    mutex_lock(&paging_mutex);
+    
     uint32_t pd_index = (uint32_t)virtual >> 22;
     uint32_t pt_index = ((uint32_t)virtual >> 12) & 0x3FF;
     
+    // Check if this is a protected region
+    protected_region_t* region = get_protected_region(virtual);
+    if (region) {
+        log_warning("PAGING", "Attempt to unmap protected region %s at %p", region->name, virtual);
+        mutex_unlock(&paging_mutex);
+        return;
+    }
+    
     // Make sure page directory entry exists
     if (!(current_page_directory[pd_index] & PAGE_FLAG_PRESENT)) {
+        mutex_unlock(&paging_mutex);
         return; // Nothing to unmap
     }
     
@@ -338,17 +395,22 @@ void unmap_page(void* virtual) {
     
     // Invalidate TLB entry
     flush_tlb_entry(virtual);
+    
+    mutex_unlock(&paging_mutex);
 }
 
 /**
  * Get the flags for a mapped page
  */
 uint32_t paging_get_page_flags(void* virtual) {
+    mutex_lock(&paging_mutex);
+    
     uint32_t pd_index = (uint32_t)virtual >> 22;
     uint32_t pt_index = ((uint32_t)virtual >> 12) & 0x3FF;
     
     // Make sure page directory entry exists
     if (!(current_page_directory[pd_index] & PAGE_FLAG_PRESENT)) {
+        mutex_unlock(&paging_mutex);
         return 0; // Not mapped
     }
     
@@ -356,19 +418,24 @@ uint32_t paging_get_page_flags(void* virtual) {
     page_table_t* table = (page_table_t*)(current_page_directory[pd_index] & ~0xFFF);
     
     // Return the flags
-    return table->entries[pt_index] & 0xFFF;
+    uint32_t flags = table->entries[pt_index] & 0xFFF;
+    mutex_unlock(&paging_mutex);
+    return flags;
 }
 
 /**
  * Update flags for an existing page mapping
  */
 int paging_update_flags(void* virtual, uint32_t flags) {
+    mutex_lock(&paging_mutex);
+    
     uint32_t pd_index = (uint32_t)virtual >> 22;
     uint32_t pt_index = ((uint32_t)virtual >> 12) & 0x3FF;
     
     // Make sure page directory entry exists
     if (!(current_page_directory[pd_index] & PAGE_FLAG_PRESENT)) {
-        log_error("Paging: Attempt to update flags for unmapped page %p", virtual);
+        log_error("PAGING", "Attempt to update flags for unmapped page %p", virtual);
+        mutex_unlock(&paging_mutex);
         return -1;
     }
     
@@ -377,7 +444,16 @@ int paging_update_flags(void* virtual, uint32_t flags) {
     
     // Make sure page table entry exists
     if (!(table->entries[pt_index] & PAGE_FLAG_PRESENT)) {
-        log_error("Paging: Attempt to update flags for unmapped page %p", virtual);
+        log_error("PAGING", "Attempt to update flags for unmapped page %p", virtual);
+        mutex_unlock(&paging_mutex);
+        return -1;
+    }
+    
+    // Check if this is a protected region
+    protected_region_t* region = get_protected_region(virtual);
+    if (region) {
+        log_warning("PAGING", "Attempt to modify protected region %s at %p", region->name, virtual);
+        mutex_unlock(&paging_mutex);
         return -1;
     }
     
@@ -388,6 +464,7 @@ int paging_update_flags(void* virtual, uint32_t flags) {
     // Invalidate TLB entry
     flush_tlb_entry(virtual);
     
+    mutex_unlock(&paging_mutex);
     return 0;
 }
 
@@ -395,10 +472,13 @@ int paging_update_flags(void* virtual, uint32_t flags) {
  * Create a new page directory for a process
  */
 uint32_t paging_create_address_space(int kernel_accessible) {
+    mutex_lock(&paging_mutex);
+    
     // Allocate page for new directory
-    void* new_dir_phys = allocate_page();
+    void* new_dir_phys = allocate_page(); // Already thread-safe
     if (!new_dir_phys) {
-        log_error("Paging: Failed to allocate page for new address space");
+        log_error("PAGING", "Failed to allocate page for new address space");
+        mutex_unlock(&paging_mutex);
         return 0;
     }
     
@@ -414,6 +494,7 @@ uint32_t paging_create_address_space(int kernel_accessible) {
         }
     }
     
+    mutex_unlock(&paging_mutex);
     return (uint32_t)new_dir_phys;
 }
 
@@ -421,8 +502,11 @@ uint32_t paging_create_address_space(int kernel_accessible) {
  * Switch to a different address space
  */
 void paging_switch_address_space(uint32_t page_directory) {
+    mutex_lock(&paging_mutex);
+    
     if (page_directory == 0) {
-        log_error("Paging: Attempt to switch to null address space");
+        log_error("PAGING", "Attempt to switch to null address space");
+        mutex_unlock(&paging_mutex);
         return;
     }
     
@@ -433,6 +517,8 @@ void paging_switch_address_space(uint32_t page_directory) {
     current_page_directory = (uint32_t*)page_directory;
     
     memory_stats.address_space_switches++;
+    
+    mutex_unlock(&paging_mutex);
 }
 
 /**
@@ -448,9 +534,12 @@ uint32_t paging_get_current_address_space() {
  * Clone the current address space (for fork operations)
  */
 uint32_t paging_clone_address_space(int copy_on_write) {
+    mutex_lock(&paging_mutex);
+    
     // Create new empty page directory
     uint32_t new_dir_phys = paging_create_address_space(1); // Include kernel mappings
     if (new_dir_phys == 0) {
+        mutex_unlock(&paging_mutex);
         return 0;
     }
     
@@ -467,7 +556,7 @@ uint32_t paging_clone_address_space(int copy_on_write) {
         page_table_t* src_table = (page_table_t*)(current_page_directory[pd_idx] & ~0xFFF);
         
         // Create new page table
-        void* new_table_phys = allocate_page();
+        void* new_table_phys = allocate_page(); // Already thread-safe
         if (!new_table_phys) {
             // Cleanup on failure - free all allocated tables
             for (uint32_t i = 0; i < pd_idx; i++) {
@@ -476,6 +565,7 @@ uint32_t paging_clone_address_space(int copy_on_write) {
                 }
             }
             free_page((void*)new_dir_phys);
+            mutex_unlock(&paging_mutex);
             return 0;
         }
         
@@ -509,11 +599,25 @@ uint32_t paging_clone_address_space(int copy_on_write) {
                 dst_table->entries[pt_idx] = phys_addr | new_flags;
             } else {
                 // For full copy: Allocate new physical page and copy data
-                void* new_page = allocate_page();
+                void* new_page = allocate_page(); // Already thread-safe
                 if (!new_page) {
                     // Handle allocation failure
-                    // TODO: Clean up previously allocated resources
+                    // Clean up previously allocated resources
+                    for (uint32_t cleanup_pd = 0; cleanup_pd < pd_idx; cleanup_pd++) {
+                        if (new_dir[cleanup_pd] & PAGE_FLAG_PRESENT) {
+                            page_table_t* cleanup_table = (page_table_t*)(new_dir[cleanup_pd] & ~0xFFF);
+                            for (uint32_t cleanup_pt = 0; cleanup_pt < PAGE_TABLE_ENTRIES; cleanup_pt++) {
+                                if ((cleanup_pd < pd_idx || cleanup_pt < pt_idx) && 
+                                    (cleanup_table->entries[cleanup_pt] & PAGE_FLAG_PRESENT)) {
+                                    void* page_to_free = (void*)(cleanup_table->entries[cleanup_pt] & ~0xFFF);
+                                    free_page(page_to_free);
+                                }
+                            }
+                            free_page((void*)(new_dir[cleanup_pd] & ~0xFFF));
+                        }
+                    }
                     free_page((void*)new_dir_phys);
+                    mutex_unlock(&paging_mutex);
                     return 0;
                 }
                 
@@ -531,6 +635,7 @@ uint32_t paging_clone_address_space(int copy_on_write) {
     // Store shadow page directory for potential COW operations
     memcpy(shadow_page_directory, new_dir, PAGE_DIRECTORY_ENTRIES * sizeof(uint32_t));
     
+    mutex_unlock(&paging_mutex);
     return new_dir_phys;
 }
 
@@ -540,7 +645,7 @@ uint32_t paging_clone_address_space(int copy_on_write) {
 int paging_map_user_memory(void* virtual, size_t size, int writable, int executable) {
     // Check if address is in user space
     if ((uint32_t)virtual >= 0xC0000000) {
-        log_error("Paging: Attempted to map kernel space address %p as user memory", virtual);
+        log_error("PAGING", "Attempted to map kernel space address %p as user memory", virtual);
         return -1;
     }
     
@@ -556,7 +661,7 @@ int paging_map_user_memory(void* virtual, size_t size, int writable, int executa
     
     // Allocate and map pages
     for (uint32_t i = 0; i < num_pages; i++) {
-        void* phys_page = allocate_page();
+        void* phys_page = allocate_page(); // Already thread-safe
         if (!phys_page) {
             // Free previously allocated pages on failure
             for (uint32_t j = 0; j < i; j++) {
@@ -569,11 +674,22 @@ int paging_map_user_memory(void* virtual, size_t size, int writable, int executa
         }
         
         void* virt_page = (void*)((uint32_t)aligned_addr + i * PAGE_SIZE);
-        if (paging_map_page(phys_page, virt_page, flags) != 0) {
+        int map_result = paging_map_page(phys_page, virt_page, flags);
+        if (map_result != 0) {
             free_page(phys_page);
+            // Free previously allocated pages 
+            for (uint32_t j = 0; j < i; j++) {
+                void* virt = (void*)((uint32_t)aligned_addr + j * PAGE_SIZE);
+                uint32_t phys = get_physical_address(virt);
+                unmap_page(virt);
+                free_page((void*)phys);
+            }
             return -1;
         }
     }
+    
+    // Track memory mapping in statistics
+    memory_stats.memory_mapped_regions++;
     
     return 0;
 }
@@ -589,12 +705,15 @@ uint32_t get_free_pages_count() {
  * Get the physical address for a virtual address
  */
 static uint32_t get_physical_address(void* virtual) {
+    mutex_lock(&paging_mutex);
+    
     uint32_t pd_index = (uint32_t)virtual >> 22;
     uint32_t pt_index = ((uint32_t)virtual >> 12) & 0x3FF;
     uint32_t offset = (uint32_t)virtual & 0xFFF;
     
     // Check if page directory entry exists
     if (!(current_page_directory[pd_index] & PAGE_FLAG_PRESENT)) {
+        mutex_unlock(&paging_mutex);
         return 0;
     }
     
@@ -603,19 +722,26 @@ static uint32_t get_physical_address(void* virtual) {
     
     // Check if page table entry exists
     if (!(table->entries[pt_index] & PAGE_FLAG_PRESENT)) {
+        mutex_unlock(&paging_mutex);
         return 0;
     }
     
     // Combine physical page address with offset
-    return (table->entries[pt_index] & ~0xFFF) | offset;
+    uint32_t result = (table->entries[pt_index] & ~0xFFF) | offset;
+    
+    mutex_unlock(&paging_mutex);
+    return result;
 }
 
 /**
  * Add a protected memory region
  */
 int paging_protect_region(void* start, void* end, uint32_t flags, const char* name) {
+    mutex_lock(&paging_mutex);
+    
     if (num_protected_regions >= MAX_PROTECTED_REGIONS) {
-        log_error("Paging: Cannot protect region, maximum number already defined");
+        log_error("PAGING", "Cannot protect region, maximum number already defined");
+        mutex_unlock(&paging_mutex);
         return -1;
     }
     
@@ -625,9 +751,10 @@ int paging_protect_region(void* start, void* end, uint32_t flags, const char* na
     protected_regions[num_protected_regions].name = name;
     num_protected_regions++;
     
-    log_info("Paging: Protected region %s: %p-%p with flags 0x%x", 
+    log_info("PAGING", "Protected region %s: %p-%p with flags 0x%x", 
              name, start, end, flags);
-             
+    
+    mutex_unlock(&paging_mutex);
     return 0;
 }
 
@@ -663,16 +790,17 @@ void page_fault_handler() {
     
     // Check if this is a copy-on-write fault we can handle
     if (!present && write && handle_page_fault((void*)fault_addr, write, user) == 0) {
+        memory_stats.cow_faults_handled++;
         return; // Successfully handled
     }
     
     // Check if address is in a protected region
     protected_region_t* region = get_protected_region((void*)fault_addr);
     if (region) {
-        log_error("Page Fault: Access violation in protected region %s at address %p", 
+        log_error("PAGE FAULT", "Access violation in protected region %s at address %p", 
                  region->name, (void*)fault_addr);
     } else {
-        log_error("Page Fault: %s %s %s %s %s at address %p",
+        log_error("PAGE FAULT", "%s %s %s %s %s at address %p",
                  present ? "protection" : "non-present",
                  write ? "write" : "read",
                  user ? "user" : "kernel",
@@ -685,16 +813,24 @@ void page_fault_handler() {
     extern uint32_t current_process_id;
     extern const char* get_process_name(uint32_t pid);
     
-    log_error("Process %u (%s) caused the fault", 
-             current_process_id, 
-             get_process_name(current_process_id));
+    if (current_process_id != 0) {
+        log_error("PAGE FAULT", "Process %u (%s) caused the fault", 
+                current_process_id, 
+                get_process_name(current_process_id));
+    } else {
+        log_error("PAGE FAULT", "Kernel-mode fault with no active process");
+    }
+    
+    // Print memory statistics
+    log_error("PAGE FAULT", "Memory stats: %u allocated, %u freed, %u page faults",
+             memory_stats.pages_allocated, memory_stats.pages_freed, memory_stats.page_faults);
              
     // Emergency halt for kernel faults, user process termination for user faults
     if (!user) {
-        log_emergency("Kernel page fault - system halted");
+        log_emergency("PAGE FAULT", "Kernel page fault - system halted");
         asm volatile("cli; hlt");
     } else {
-        log_warning("Terminating faulting process");
+        log_warning("PAGE FAULT", "Terminating faulting process");
         extern void terminate_process(uint32_t pid);
         terminate_process(current_process_id);
     }
@@ -711,8 +847,11 @@ static int handle_page_fault(void* fault_addr, int is_write, int is_user) {
     uint32_t pd_idx = (uint32_t)page_addr >> 22;
     uint32_t pt_idx = ((uint32_t)page_addr >> 12) & 0x3FF;
     
+    mutex_lock(&paging_mutex);
+    
     // Need page directory and table for current address space
     if (!(current_page_directory[pd_idx] & PAGE_FLAG_PRESENT)) {
+        mutex_unlock(&paging_mutex);
         return -1; // Not a valid mapping
     }
     
@@ -730,9 +869,10 @@ static int handle_page_fault(void* fault_addr, int is_write, int is_user) {
         // Verify it's a COW page with multiple references
         if (page_info_array[page_idx].references > 1) {
             // Allocate new physical page for this process
-            void* new_phys = allocate_page();
+            void* new_phys = allocate_page(); // Already thread-safe
             if (!new_phys) {
-                log_error("Page Fault: Failed to allocate page for COW");
+                log_error("PAGE FAULT", "Failed to allocate page for COW");
+                mutex_unlock(&paging_mutex);
                 return -1;
             }
             
@@ -750,6 +890,7 @@ static int handle_page_fault(void* fault_addr, int is_write, int is_user) {
             // Invalidate TLB entry
             flush_tlb_entry(page_addr);
             
+            mutex_unlock(&paging_mutex);
             return 0; // Successfully handled COW fault
         }
         
@@ -757,6 +898,7 @@ static int handle_page_fault(void* fault_addr, int is_write, int is_user) {
         if (page_info_array[page_idx].references == 1) {
             pt->entries[pt_idx] |= PAGE_FLAG_WRITABLE;
             flush_tlb_entry(page_addr);
+            mutex_unlock(&paging_mutex);
             return 0;
         }
     }
@@ -769,9 +911,10 @@ static int handle_page_fault(void* fault_addr, int is_write, int is_user) {
         page_table_t* shadow_pt = (page_table_t*)(shadow_page_directory[pd_idx] & ~0xFFF);
         if (shadow_pt && (shadow_pt->entries[pt_idx] & PAGE_FLAG_PRESENT)) {
             // Allocate new physical page
-            void* new_phys = allocate_page();
+            void* new_phys = allocate_page(); // Already thread-safe
             if (!new_phys) {
-                log_error("Page Fault: Failed to allocate page for demand paging");
+                log_error("PAGE FAULT", "Failed to allocate page for demand paging");
+                mutex_unlock(&paging_mutex);
                 return -1;
             }
             
@@ -786,10 +929,14 @@ static int handle_page_fault(void* fault_addr, int is_write, int is_user) {
             pt->entries[pt_idx] = (uint32_t)new_phys | flags;
             flush_tlb_entry(page_addr);
             
+            memory_stats.demand_pages_loaded++;
+            
+            mutex_unlock(&paging_mutex);
             return 0; // Successfully handled demand paging
         }
     }
     
+    mutex_unlock(&paging_mutex);
     return -1; // Could not handle this page fault
 }
 
@@ -814,14 +961,18 @@ static void flush_entire_tlb() {
  * Get memory statistics
  */
 void paging_get_stats(uint32_t* stats, uint32_t size) {
+    mutex_lock(&paging_mutex);
     if (size >= sizeof(memory_stats)) {
         memcpy(stats, &memory_stats, sizeof(memory_stats));
     }
+    mutex_unlock(&paging_mutex);
 }
 
 /**
  * Reset memory statistics counters
  */
 void paging_reset_stats() {
+    mutex_lock(&paging_mutex);
     memset(&memory_stats, 0, sizeof(memory_stats));
+    mutex_unlock(&paging_mutex);
 }
