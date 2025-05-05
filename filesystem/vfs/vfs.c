@@ -7,6 +7,10 @@ static vfs_filesystem_t* registered_filesystems[VFS_MAX_MOUNTS] = {0};
 static vfs_mount_t* mount_points = NULL;
 static int vfs_initialized = 0;
 
+// Mutex locks for thread synchronization - needed in a real OS
+static mutex_t vfs_lock;             // Global VFS lock for operations on mount points
+static mutex_t fs_registry_lock;     // Lock for filesystem type registry operations
+
 /* String utility functions */
 static void vfs_copy_path(char* dest, const char* src, size_t max_len) {
     size_t i = 0;
@@ -159,6 +163,10 @@ int vfs_init(void) {
         return VFS_SUCCESS;
     }
     
+    /* Initialize the mutexes */
+    mutex_init(&vfs_lock);
+    mutex_init(&fs_registry_lock);
+    
     /* Clear the filesystem registry */
     for (int i = 0; i < VFS_MAX_MOUNTS; i++) {
         registered_filesystems[i] = NULL;
@@ -175,6 +183,8 @@ int vfs_init(void) {
 
 /* Register a filesystem type */
 int vfs_register_fs(vfs_filesystem_t* fs_type) {
+    int result;
+    
     if (!vfs_initialized) {
         return VFS_ERR_UNKNOWN;
     }
@@ -183,19 +193,28 @@ int vfs_register_fs(vfs_filesystem_t* fs_type) {
         return VFS_ERR_INVALID_ARG;
     }
     
+    // Lock the filesystem registry for thread safety
+    mutex_lock(&fs_registry_lock);
+    
     /* Find an empty slot */
     for (int i = 0; i < VFS_MAX_MOUNTS; i++) {
         if (!registered_filesystems[i]) {
             registered_filesystems[i] = fs_type;
             log_info("VFS", "Registered filesystem type: %s", fs_type->name);
-            return VFS_SUCCESS;
+            result = VFS_SUCCESS;
+            goto unlock_and_return;
         } else if (vfs_strcmp(registered_filesystems[i]->name, fs_type->name) == 0) {
             /* Already registered */
-            return VFS_ERR_EXISTS;
+            result = VFS_ERR_EXISTS;
+            goto unlock_and_return;
         }
     }
     
-    return VFS_ERR_NO_SPACE;
+    result = VFS_ERR_NO_SPACE;
+    
+unlock_and_return:
+    mutex_unlock(&fs_registry_lock);
+    return result;
 }
 
 /* Find a registered filesystem type by name */
@@ -212,6 +231,7 @@ static vfs_filesystem_t* vfs_find_fs_type(const char* name) {
 /* Mount a filesystem */
 int vfs_mount(const char* fs_name, const char* device, const char* mount_point, int flags) {
     char normalized_mount[VFS_MAX_PATH];
+    int result;
     
     if (!vfs_initialized) {
         return VFS_ERR_UNKNOWN;
@@ -221,8 +241,14 @@ int vfs_mount(const char* fs_name, const char* device, const char* mount_point, 
         return VFS_ERR_INVALID_ARG;
     }
     
+    // Lock filesystem registry for reading
+    mutex_lock(&fs_registry_lock);
+    
     /* Find the filesystem type */
     vfs_filesystem_t* fs_type = vfs_find_fs_type(fs_name);
+    
+    mutex_unlock(&fs_registry_lock);
+    
     if (!fs_type) {
         log_error("VFS", "Filesystem type not found: %s", fs_name);
         return VFS_ERR_NOT_FOUND;
@@ -231,10 +257,14 @@ int vfs_mount(const char* fs_name, const char* device, const char* mount_point, 
     /* Normalize mount point path */
     vfs_normalize_path(mount_point, normalized_mount, VFS_MAX_PATH);
     
+    // Lock the VFS mount points list for writing
+    mutex_lock(&vfs_lock);
+    
     /* Check if mount point already exists */
     for (vfs_mount_t* mount = mount_points; mount; mount = mount->next) {
         if (vfs_strcmp(mount->mount_point, normalized_mount) == 0) {
             log_error("VFS", "Mount point already exists: %s", normalized_mount);
+            mutex_unlock(&vfs_lock);
             return VFS_ERR_EXISTS;
         }
     }
@@ -243,6 +273,7 @@ int vfs_mount(const char* fs_name, const char* device, const char* mount_point, 
     vfs_mount_t* new_mount = (vfs_mount_t*)malloc(sizeof(vfs_mount_t));
     if (!new_mount) {
         log_error("VFS", "Failed to allocate memory for mount point");
+        mutex_unlock(&vfs_lock);
         return VFS_ERR_NO_SPACE;
     }
     
@@ -257,15 +288,24 @@ int vfs_mount(const char* fs_name, const char* device, const char* mount_point, 
     new_mount->flags = flags;
     new_mount->next = NULL;
     
+    // Initialize mount-specific mutex
+    mutex_init(&new_mount->lock);
+    
+    // Unlock before calling fs-specific handler which might take time
+    mutex_unlock(&vfs_lock);
+    
     /* Call filesystem-specific mount handler */
     if (fs_type->mount) {
-        int result = fs_type->mount(new_mount);
+        result = fs_type->mount(new_mount);
         if (result != VFS_SUCCESS) {
             log_error("VFS", "Filesystem-specific mount failed for %s: %d", normalized_mount, result);
             free(new_mount);
             return result;
         }
     }
+    
+    // Lock again to update the mount points list
+    mutex_lock(&vfs_lock);
     
     /* Add to mount list */
     if (!mount_points) {
@@ -278,6 +318,8 @@ int vfs_mount(const char* fs_name, const char* device, const char* mount_point, 
         }
         mount->next = new_mount;
     }
+    
+    mutex_unlock(&vfs_lock);
     
     log_info("VFS", "Mounted %s on %s (type: %s)", device ? device : "none", normalized_mount, fs_name);
     
@@ -299,6 +341,9 @@ int vfs_unmount(const char* mount_point) {
     /* Normalize mount point path */
     vfs_normalize_path(mount_point, normalized_mount, VFS_MAX_PATH);
     
+    // Lock the VFS mount points list for writing
+    mutex_lock(&vfs_lock);
+    
     /* Find the mount point */
     vfs_mount_t* prev = NULL;
     vfs_mount_t* mount = mount_points;
@@ -313,6 +358,7 @@ int vfs_unmount(const char* mount_point) {
     
     if (!mount) {
         log_error("VFS", "Mount point not found: %s", normalized_mount);
+        mutex_unlock(&vfs_lock);
         return VFS_ERR_NOT_FOUND;
     }
     
@@ -321,6 +367,7 @@ int vfs_unmount(const char* mount_point) {
         int result = mount->fs_type->unmount(mount);
         if (result != VFS_SUCCESS) {
             log_error("VFS", "Filesystem-specific unmount failed for %s: %d", normalized_mount, result);
+            mutex_unlock(&vfs_lock);
             return result;
         }
     }
@@ -337,6 +384,8 @@ int vfs_unmount(const char* mount_point) {
     /* Free mount structure */
     free(mount);
     
+    mutex_unlock(&vfs_lock);
+    
     return VFS_SUCCESS;
 }
 
@@ -349,11 +398,15 @@ int vfs_open(const char* path, int flags, vfs_file_t** file) {
     if (!path || !file) {
         return VFS_ERR_INVALID_ARG;
     }
+
+    // Lock VFS while searching for mount point
+    mutex_lock(&vfs_lock);
     
     /* Find the mount point for this path */
     vfs_mount_t* mount = vfs_find_mount_point(path);
     if (!mount) {
         log_error("VFS", "No mount point for path: %s", path);
+        mutex_unlock(&vfs_lock);
         return VFS_ERR_NOT_FOUND;
     }
     
@@ -361,10 +414,17 @@ int vfs_open(const char* path, int flags, vfs_file_t** file) {
     char relative_path[VFS_MAX_PATH];
     vfs_extract_relative_path(path, mount->mount_point, relative_path, VFS_MAX_PATH);
     
+    // We have the mount point, now lock that specific filesystem
+    mutex_lock(&mount->lock);
+    
+    // VFS global lock can be released now that we have the mount-specific lock
+    mutex_unlock(&vfs_lock);
+    
     /* Allocate a file handle */
     vfs_file_t* new_file = (vfs_file_t*)malloc(sizeof(vfs_file_t));
     if (!new_file) {
         log_error("VFS", "Failed to allocate memory for file handle");
+        mutex_unlock(&mount->lock);
         return VFS_ERR_NO_SPACE;
     }
     
@@ -375,15 +435,22 @@ int vfs_open(const char* path, int flags, vfs_file_t** file) {
     new_file->position = 0;
     new_file->fs_data = NULL;
     
+    // Initialize file-specific lock for concurrent read/write operations
+    mutex_init(&new_file->lock);
+    
     /* Call filesystem-specific open handler */
     if (mount->fs_type && mount->fs_type->open) {
         int result = mount->fs_type->open(mount, relative_path, flags, &new_file);
         if (result != VFS_SUCCESS) {
             log_error("VFS", "Filesystem-specific open failed for %s: %d", path, result);
             free(new_file);
+            mutex_unlock(&mount->lock);
             return result;
         }
     }
+    
+    // Release the mount lock now that the file is open
+    mutex_unlock(&mount->lock);
     
     /* Return the file handle */
     *file = new_file;
@@ -418,6 +485,8 @@ int vfs_close(vfs_file_t* file) {
 
 /* Read from a file */
 int vfs_read(vfs_file_t* file, void* buffer, uint32_t size, uint32_t* bytes_read) {
+    int result;
+    
     if (!vfs_initialized) {
         return VFS_ERR_UNKNOWN;
     }
@@ -431,24 +500,29 @@ int vfs_read(vfs_file_t* file, void* buffer, uint32_t size, uint32_t* bytes_read
         return VFS_ERR_INVALID_ARG;
     }
     
+    // Lock the file for thread safety during read
+    mutex_lock(&file->lock);
+    
     /* Call filesystem-specific read handler */
     if (file->mount && file->mount->fs_type && file->mount->fs_type->read) {
-        int result = file->mount->fs_type->read(file, buffer, size, bytes_read);
-        if (result != VFS_SUCCESS) {
-            return result;
-        }
+        result = file->mount->fs_type->read(file, buffer, size, bytes_read);
     } else {
         if (bytes_read) {
             *bytes_read = 0;
         }
-        return VFS_ERR_UNSUPPORTED;
+        result = VFS_ERR_UNSUPPORTED;
     }
     
-    return VFS_SUCCESS;
+    // Unlock the file
+    mutex_unlock(&file->lock);
+    
+    return result;
 }
 
 /* Write to a file */
 int vfs_write(vfs_file_t* file, const void* buffer, uint32_t size, uint32_t* bytes_written) {
+    int result;
+    
     if (!vfs_initialized) {
         return VFS_ERR_UNKNOWN;
     }
@@ -462,20 +536,23 @@ int vfs_write(vfs_file_t* file, const void* buffer, uint32_t size, uint32_t* byt
         return VFS_ERR_INVALID_ARG;
     }
     
+    // Lock the file for thread safety during write
+    mutex_lock(&file->lock);
+    
     /* Call filesystem-specific write handler */
     if (file->mount && file->mount->fs_type && file->mount->fs_type->write) {
-        int result = file->mount->fs_type->write(file, buffer, size, bytes_written);
-        if (result != VFS_SUCCESS) {
-            return result;
-        }
+        result = file->mount->fs_type->write(file, buffer, size, bytes_written);
     } else {
         if (bytes_written) {
             *bytes_written = 0;
         }
-        return VFS_ERR_UNSUPPORTED;
+        result = VFS_ERR_UNSUPPORTED;
     }
     
-    return VFS_SUCCESS;
+    // Unlock the file
+    mutex_unlock(&file->lock);
+    
+    return result;
 }
 
 /* Seek within a file */

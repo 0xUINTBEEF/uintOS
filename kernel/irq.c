@@ -251,14 +251,97 @@ void ioapic_write(uint8_t reg, uint32_t value) {
  * Initialize the IO APIC
  */
 void ioapic_init() {
-    // This is a simplified implementation. In a real OS, you would
-    // discover IO APICs through ACPI tables.
+    // In a real OS, we discover IO APICs through ACPI tables
+    log_info("IRQ", "Initializing IO APIC using ACPI tables");
     
-    // Set up some basic IRQs
-    // By default, route IRQ 0-15 to vectors 32-47
-    for (int i = 0; i < 16; i++) {
-        ioapic_set_irq(i, i, 0, 0);
+    // Step 1: Find the ACPI Root System Description Pointer (RSDP)
+    uintptr_t rsdp = acpi_find_rsdp();
+    if (!rsdp) {
+        log_error("IRQ", "Failed to find ACPI RSDP, falling back to default IOAPIC configuration");
+        // Fallback configuration (legacy mode)
+        for (int i = 0; i < 16; i++) {
+            ioapic_set_irq(i, i, 0, 0);
+        }
+        return;
     }
+    
+    // Step 2: Parse ACPI tables to find MADT (Multiple APIC Description Table)
+    acpi_madt_t* madt = acpi_find_table(rsdp, "APIC");
+    if (!madt) {
+        log_error("IRQ", "Failed to find ACPI MADT, falling back to default IOAPIC configuration");
+        // Fallback configuration
+        for (int i = 0; i < 16; i++) {
+            ioapic_set_irq(i, i, 0, 0);
+        }
+        return;
+    }
+    
+    // Step 3: Process MADT entries to find IO APIC information
+    uint8_t* entry = (uint8_t*)madt + sizeof(acpi_madt_t);
+    uint8_t* end = (uint8_t*)madt + madt->header.length;
+    
+    int found_ioapic = 0;
+    
+    while (entry < end) {
+        uint8_t entry_type = *entry;
+        uint8_t entry_length = *(entry + 1);
+        
+        if (entry_type == 1) { // IO APIC entry
+            acpi_madt_ioapic_t* ioapic_entry = (acpi_madt_ioapic_t*)entry;
+            
+            log_info("IRQ", "Found IO APIC id %d at address 0x%x with base GSI %d",
+                    ioapic_entry->id, ioapic_entry->address, ioapic_entry->global_irq_base);
+            
+            // Store the IO APIC address
+            ioapic_address = ioapic_entry->address;
+            found_ioapic = 1;
+            
+            // Initialize this IO APIC
+            uint32_t ioapic_id = ioapic_read(IOAPIC_ID_REG);
+            uint32_t ioapic_ver = ioapic_read(IOAPIC_VER_REG);
+            uint32_t max_redirection_entries = ((ioapic_ver >> 16) & 0xFF) + 1;
+            
+            log_info("IRQ", "IO APIC ID: %d, Version: %d, Max entries: %d",
+                    ioapic_id, ioapic_ver & 0xFF, max_redirection_entries);
+            
+            // Step 4: Process interrupt source overrides to handle IRQ remapping
+            uint8_t* override_entry = (uint8_t*)madt + sizeof(acpi_madt_t);
+            while (override_entry < end) {
+                uint8_t override_type = *override_entry;
+                uint8_t override_length = *(override_entry + 1);
+                
+                if (override_type == 2) { // Interrupt Source Override
+                    acpi_madt_interrupt_override_t* iso = 
+                        (acpi_madt_interrupt_override_t*)override_entry;
+                    
+                    log_debug("IRQ", "IRQ override: IRQ %d maps to GSI %d, flags: 0x%x",
+                             iso->irq_source, iso->global_system_interrupt, iso->flags);
+                    
+                    // Apply the override mapping
+                    uint8_t flags = 0;
+                    if (iso->flags & 2) flags |= 2; // Active low
+                    if (iso->flags & 8) flags |= 1; // Level triggered
+                    
+                    ioapic_set_irq(iso->irq_source, iso->global_system_interrupt, 0, flags);
+                }
+                
+                override_entry += override_length;
+            }
+        }
+        
+        entry += entry_length;
+    }
+    
+    // Step 5: Setup standard IRQs if no overrides were found
+    if (!found_ioapic) {
+        log_warning("IRQ", "No IO APIC found in ACPI tables, using default address");
+        // Use default address and setup
+        for (int i = 0; i < 16; i++) {
+            ioapic_set_irq(i, i, 0, 0);
+        }
+    }
+    
+    log_info("IRQ", "IO APIC initialization complete");
 }
 
 /**

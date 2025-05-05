@@ -149,9 +149,22 @@ void* vm_memory_allocate(uint32_t vm_id, uint32_t size) {
     
     // Get the physical address
     uint32_t physical_address = 0;
-    // In a real OS, you'd use a function to get the physical address from virtual
-    // For simplicity, we'll use a placeholder calculation
-    physical_address = (uint32_t)virtual_address; // This is a simplification
+    // Use proper memory translation function to get physical address from virtual
+    page_table_entry_t* pte = get_page_table_entry((uintptr_t)virtual_address);
+    if (pte && (*pte & PAGE_FLAG_PRESENT)) {
+        // Extract the physical address from the page table entry (bits 31:12)
+        physical_address = (*pte & 0xFFFFF000);
+        // Add the offset within the page
+        physical_address |= ((uintptr_t)virtual_address & 0xFFF);
+        
+        log_debug(VM_MEM_LOG_TAG, "Translated virtual 0x%p to physical 0x%x", 
+                 virtual_address, physical_address);
+    } else {
+        // If page table entry doesn't exist, this might be identity mapped memory
+        log_warn(VM_MEM_LOG_TAG, "No page table entry for 0x%p, assuming identity mapping", 
+                virtual_address);
+        physical_address = (uint32_t)virtual_address;
+    }
     
     // Create a tracking block
     vm_memory_block_t* block = (vm_memory_block_t*)malloc(sizeof(vm_memory_block_t));
@@ -288,17 +301,137 @@ int vm_memory_translate(uint32_t vm_id, uint32_t guest_virtual, uint32_t* host_p
         return VM_MEM_ERROR_VM_NOT_FOUND;
     }
     
-    // Switch to the VM's address space
+    // Save current CR3 value to restore the original page tables later
     uint32_t current_cr3 = paging_get_current_address_space();
+    
+    // Switch to the VM's address space by loading its CR3
     paging_switch_address_space(vm->cr3);
     
-    // Get the physical address
-    // In a real implementation, we would use the page tables to translate
-    // For now, we'll use a simplistic approach
-    *host_physical = guest_virtual; // This is a simplification
+    // Extract parts of the virtual address
+    uint32_t pde_index = (guest_virtual >> 22) & 0x3FF;    // Bits 31-22: PD index
+    uint32_t pte_index = (guest_virtual >> 12) & 0x3FF;    // Bits 21-12: PT index
+    uint32_t page_offset = guest_virtual & 0xFFF;          // Bits 11-0: Offset into page
     
-    // Switch back to the original address space
+    // Get the page directory entry
+    uint32_t* page_directory = (uint32_t*)(vm->cr3 & 0xFFFFF000); // CR3 points to page dir
+    uint32_t pde = page_directory[pde_index];
+    
+    if (!(pde & PAGE_FLAG_PRESENT)) {
+        log_error(VM_MEM_LOG_TAG, "Page directory entry not present for address 0x%x", guest_virtual);
+        // Restore original page tables
+        paging_switch_address_space(current_cr3);
+        return VM_MEM_ERROR_ADDRESS_NOT_FOUND;
+    }
+    
+    // Check if this is a 4MB page (PSE bit set)
+    if (pde & PAGE_FLAG_LARGE_PAGE) {
+        // For 4MB pages, the PDE directly contains the physical base address
+        // The physical address uses bits 31-22 from PDE, and bits 21-0 from the virtual address
+        *host_physical = (pde & 0xFFC00000) | (guest_virtual & 0x003FFFFF);
+        log_debug(VM_MEM_LOG_TAG, "4MB page: Translated 0x%x to physical 0x%x", 
+                 guest_virtual, *host_physical);
+    } else {
+        // For 4KB pages, we need to go through the page table
+        uint32_t* page_table = (uint32_t*)((pde & 0xFFFFF000));
+        uint32_t pte = page_table[pte_index];
+        
+        if (!(pte & PAGE_FLAG_PRESENT)) {
+            log_error(VM_MEM_LOG_TAG, "Page table entry not present for address 0x%x", guest_virtual);
+            // Restore original page tables
+            paging_switch_address_space(current_cr3);
+            return VM_MEM_ERROR_ADDRESS_NOT_FOUND;
+        }
+        
+        // Extract the physical page number and add the offset
+        *host_physical = (pte & 0xFFFFF000) | page_offset;
+        log_debug(VM_MEM_LOG_TAG, "4KB page: Translated 0x%x to physical 0x%x", 
+                 guest_virtual, *host_physical);
+    }
+    
+    // If using EPT, we need to further translate through EPT structures
+    if (vm->supports_ept) {
+        uint64_t guest_physical = *host_physical;
+        uint64_t host_physical_ept;
+        
+        int result = ept_translate_address(vm->ept_pml4, guest_physical, &host_physical_ept);
+        if (result != VM_MEM_SUCCESS) {
+            log_error(VM_MEM_LOG_TAG, "EPT translation failed for address 0x%x", guest_physical);
+            // Restore original page tables
+            paging_switch_address_space(current_cr3);
+            return result;
+        }
+        
+        *host_physical = (uint32_t)host_physical_ept;
+        log_debug(VM_MEM_LOG_TAG, "EPT: Translated guest physical 0x%x to host physical 0x%x", 
+                 guest_physical, *host_physical);
+    }
+    
+    // Restore original page tables
     paging_switch_address_space(current_cr3);
+    
+    return VM_MEM_SUCCESS;
+}
+
+/**
+ * Translate a guest physical address to host physical address using EPT
+ *
+ * @param ept_pml4 Pointer to EPT PML4 table
+ * @param guest_physical Guest physical address
+ * @param host_physical Pointer to store the host physical address
+ * @return 0 on success, error code on failure
+ */
+int ept_translate_address(ept_pml4e_t* ept_pml4, uint64_t guest_physical, uint64_t* host_physical) {
+    // Extract indices for each level
+    uint64_t pml4_index = (guest_physical >> 39) & 0x1FF;
+    uint64_t pdpt_index = (guest_physical >> 30) & 0x1FF;
+    uint64_t pd_index = (guest_physical >> 21) & 0x1FF;
+    uint64_t pt_index = (guest_physical >> 12) & 0x1FF;
+    uint64_t page_offset = guest_physical & 0xFFF;
+    
+    // Check PML4 entry
+    if (!(ept_pml4[pml4_index].read)) {
+        log_error(VM_MEM_LOG_TAG, "EPT PML4 entry not present for address 0x%llx", guest_physical);
+        return VM_MEM_ERROR_ADDRESS_NOT_FOUND;
+    }
+    
+    // Get PDPT
+    ept_pdpte_t* pdpt = (ept_pdpte_t*)(ept_pml4[pml4_index].pdpt_addr << 12);
+    
+    // Check PDPT entry
+    if (!(pdpt[pdpt_index].read)) {
+        log_error(VM_MEM_LOG_TAG, "EPT PDPT entry not present for address 0x%llx", guest_physical);
+        return VM_MEM_ERROR_ADDRESS_NOT_FOUND;
+    }
+    
+    // Get PD
+    ept_pde_t* pd = (ept_pde_t*)(pdpt[pdpt_index].pd_addr << 12);
+    
+    // Check if this is a 2MB page
+    if (pd[pd_index].large_page) {
+        // 2MB page - calculate the host physical address
+        uint64_t page_base = pd[pd_index].page_frame_number << 21;
+        uint64_t page_2m_offset = guest_physical & 0x1FFFFF; // 21 bits offset for 2MB page
+        *host_physical = page_base | page_2m_offset;
+        return VM_MEM_SUCCESS;
+    }
+    
+    // Check PD entry
+    if (!(pd[pd_index].read)) {
+        log_error(VM_MEM_LOG_TAG, "EPT PD entry not present for address 0x%llx", guest_physical);
+        return VM_MEM_ERROR_ADDRESS_NOT_FOUND;
+    }
+    
+    // Get PT
+    ept_pte_t* pt = (ept_pte_t*)(pd[pd_index].page_frame_number << 12);
+    
+    // Check PT entry
+    if (!(pt[pt_index].read)) {
+        log_error(VM_MEM_LOG_TAG, "EPT PT entry not present for address 0x%llx", guest_physical);
+        return VM_MEM_ERROR_ADDRESS_NOT_FOUND;
+    }
+    
+    // Calculate the host physical address
+    *host_physical = (pt[pt_index].page_frame_number << 12) | page_offset;
     
     return VM_MEM_SUCCESS;
 }

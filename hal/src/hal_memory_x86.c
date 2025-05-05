@@ -73,27 +73,158 @@ int hal_memory_initialize(void) {
     // Initialize memory map
     memory_map.range_count = 0;
     memory_map.ranges = memory_ranges;
-    
-    // Parse memory map provided by bootloader
-    // For now, use a simple memory layout for demonstration
-    // In a real OS, this would parse E820 entries or similar
 
-    // Assume we have 128MB of RAM for demonstration
-    const size_t demo_ram_size = 128 * 1024 * 1024; // 128 MB
+    // Parse E820 memory map provided by bootloader
+    // The E820 memory map is typically stored by BIOS at a specific address
+    // that was passed to the bootloader and then to the kernel
+    struct e820_entry {
+        uint64_t base;
+        uint64_t length;
+        uint32_t type;
+    } __attribute__((packed));
     
-    // First 1MB is reserved (BIOS, video memory, etc.)
-    memory_ranges[0].start = 0;
-    memory_ranges[0].size = 1 * 1024 * 1024;
-    memory_ranges[0].type = HAL_MEM_RESERVED;
-    memory_ranges[0].available = false;
+    // Get the E820 map entry count and pointer from bootloader-provided info
+    // In a real system, this would be passed by the bootloader
+    // For now we'll assume it's at a specific address (0x8000)
+    uint32_t* e820_count_ptr = (uint32_t*)0x8000;
+    struct e820_entry* e820_map = (struct e820_entry*)(0x8004);
+    uint32_t e820_count = *e820_count_ptr;
     
-    // Main memory (1MB - 128MB)
-    memory_ranges[1].start = 1 * 1024 * 1024;
-    memory_ranges[1].size = demo_ram_size - memory_ranges[0].size;
-    memory_ranges[1].type = HAL_MEM_RAM;
-    memory_ranges[1].available = true;
+    // Sanity check the count to prevent reading invalid memory
+    if (e820_count > 32) {
+        log_warning("HAL Memory", "E820 count too large (%d), limiting to 32 entries", e820_count);
+        e820_count = 32;
+    }
     
-    memory_map.range_count = 2;
+    // Process each E820 entry
+    for (uint32_t i = 0; i < e820_count && memory_map.range_count < 32; i++) {
+        struct e820_entry* entry = &e820_map[i];
+        
+        // Skip zero-length entries
+        if (entry->length == 0) {
+            log_debug("HAL Memory", "Skipping zero-length E820 entry at index %d", i);
+            continue;
+        }
+        
+        // Convert E820 type to HAL memory type
+        hal_memory_type_t type;
+        bool available = false;
+        
+        // E820 memory type constants (from ACPI spec)
+        #define E820_TYPE_RAM          1   // Available RAM
+        #define E820_TYPE_RESERVED     2   // Reserved - unusable
+        #define E820_TYPE_ACPI         3   // ACPI reclaim memory
+        #define E820_TYPE_ACPI_NVS     4   // ACPI NVS memory
+        #define E820_TYPE_BAD          5   // Bad memory
+        #define E820_TYPE_DISABLED     6   // Disabled memory
+        #define E820_TYPE_PMEM         7   // Persistent memory
+        #define E820_TYPE_PRAM         8   // Persistent RAM
+        
+        switch (entry->type) {
+            case E820_TYPE_RAM:  // Available RAM
+                type = HAL_MEM_RAM;
+                available = true;
+                break;
+                
+            case E820_TYPE_RESERVED:  // Reserved
+                type = HAL_MEM_RESERVED;
+                available = false;
+                break;
+                
+            case E820_TYPE_ACPI:  // ACPI reclaim memory - available after ACPI tables are parsed
+                type = HAL_MEM_ACPI_RECLAIM;
+                available = false;  // Will be available later after ACPI init
+                break;
+                
+            case E820_TYPE_ACPI_NVS:  // ACPI NVS memory
+                type = HAL_MEM_ACPI_NVS;
+                available = false;
+                break;
+                
+            case E820_TYPE_BAD:  // Bad memory
+                type = HAL_MEM_BAD;
+                available = false;
+                break;
+                
+            case E820_TYPE_DISABLED:  // Disabled memory
+                type = HAL_MEM_DISABLED;
+                available = false;
+                break;
+                
+            case E820_TYPE_PMEM:  // Persistent memory
+            case E820_TYPE_PRAM:  // Persistent RAM
+                type = HAL_MEM_PERSISTENT;
+                available = false;  // Requires special handling
+                break;
+                
+            default:
+                type = HAL_MEM_UNKNOWN;
+                available = false;
+                log_warning("HAL Memory", "Unknown E820 memory type: %d at entry %d", entry->type, i);
+                break;
+        }
+        
+        // Ensure alignment to page boundaries
+        uint64_t start_aligned = (entry->base + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1);
+        uint64_t end = entry->base + entry->length;
+        uint64_t end_aligned = end & ~(uint64_t)(PAGE_SIZE - 1);
+        
+        // Skip if alignment leaves no usable memory
+        if (start_aligned >= end_aligned) {
+            log_debug("HAL Memory", "Skipping E820 entry %d after alignment: 0x%llx-0x%llx", 
+                     i, entry->base, entry->base + entry->length - 1);
+            continue;
+        }
+        
+        // Check for physically impossible addresses for 32-bit system
+        if (start_aligned >= 0x100000000ULL) {
+            log_debug("HAL Memory", "Skipping E820 entry %d beyond 4GB: 0x%llx", i, start_aligned);
+            continue;
+        }
+        
+        // Truncate end address to 4GB for 32-bit system
+        if (end_aligned > 0x100000000ULL) {
+            log_warning("HAL Memory", "Truncating E820 entry %d end to 4GB: 0x%llx -> 0x100000000",
+                       i, end_aligned);
+            end_aligned = 0x100000000ULL;
+        }
+        
+        // Make sure start < end after all adjustments
+        if (start_aligned >= end_aligned) {
+            continue;
+        }
+        
+        // Add to our memory map
+        memory_ranges[memory_map.range_count].start = start_aligned;
+        memory_ranges[memory_map.range_count].size = end_aligned - start_aligned;
+        memory_ranges[memory_map.range_count].type = type;
+        memory_ranges[memory_map.range_count].available = available;
+        
+        log_debug("HAL Memory", "Memory range %d: 0x%llx-0x%llx (%llu KB), type=%d, available=%d",
+                 memory_map.range_count, start_aligned, end_aligned - 1,
+                 (end_aligned - start_aligned) / 1024, type, available);
+        
+        memory_map.range_count++;
+    }
+    
+    // If no E820 entries were found, fall back to a conservative default
+    if (memory_map.range_count == 0) {
+        log_warning("HAL Memory", "No E820 entries found, using conservative default memory map");
+        
+        // First 1MB is reserved (BIOS, video memory, etc.)
+        memory_ranges[0].start = 0;
+        memory_ranges[0].size = 1 * 1024 * 1024;
+        memory_ranges[0].type = HAL_MEM_RESERVED;
+        memory_ranges[0].available = false;
+        
+        // Main memory (1MB - 128MB)
+        memory_ranges[1].start = 1 * 1024 * 1024;
+        memory_ranges[1].size = 127 * 1024 * 1024; // 127 MB
+        memory_ranges[1].type = HAL_MEM_RAM;
+        memory_ranges[1].available = true;
+        
+        memory_map.range_count = 2;
+    }
     
     // Calculate total and free memory
     total_physical_pages = 0;
@@ -121,9 +252,20 @@ int hal_memory_initialize(void) {
     // Each bit represents one page, so we need (total_pages / 8) bytes
     physical_bitmap_size = (total_physical_pages + 7) / 8;
     
-    // Allocate bitmap from kernel heap (in a real OS this would use a bootstrap allocator)
-    // For now, place it at a predefined location after kernel
-    physical_bitmap = (uint8_t*)0x00400000;  // Example address
+    // Implement a proper bootstrap allocator instead of using a hardcoded address
+    // Find a suitable location for the bitmap
+    // We'll use the end of the kernel as the starting point for our allocations
+    extern char _kernel_end; // Defined in the linker script
+    uintptr_t bitmap_start = (uintptr_t)&_kernel_end;
+    
+    // Align to page boundary
+    bitmap_start = (bitmap_start + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
+    
+    // Assign the physical bitmap
+    physical_bitmap = (uint8_t*)bitmap_start;
+    
+    log_debug("HAL Memory", "Physical bitmap at 0x%x, size %zu bytes (%zu pages)",
+              bitmap_start, physical_bitmap_size, (physical_bitmap_size + PAGE_SIZE - 1) / PAGE_SIZE);
     
     // Mark all pages as used initially
     memset(physical_bitmap, 0xFF, physical_bitmap_size);
@@ -136,18 +278,33 @@ int hal_memory_initialize(void) {
             
             for (size_t page = 0; page < num_pages; page++) {
                 size_t bit_index = start_page + page;
-                physical_bitmap[bit_index / 8] &= ~(1 << (bit_index % 8));
+                if (bit_index < total_physical_pages) { // Ensure we don't exceed bitmap bounds
+                    physical_bitmap[bit_index / 8] &= ~(1 << (bit_index % 8));
+                }
             }
         }
     }
     
     // Mark the bitmap itself as used
-    uintptr_t bitmap_start_page = (uintptr_t)physical_bitmap / PAGE_SIZE;
+    uintptr_t bitmap_start_page = bitmap_start / PAGE_SIZE;
     size_t bitmap_pages = (physical_bitmap_size + PAGE_SIZE - 1) / PAGE_SIZE;
     
     for (size_t page = 0; page < bitmap_pages; page++) {
         size_t bit_index = bitmap_start_page + page;
-        physical_bitmap[bit_index / 8] |= (1 << (bit_index % 8));
+        if (bit_index < total_physical_pages) { // Ensure we don't exceed bitmap bounds
+            physical_bitmap[bit_index / 8] |= (1 << (bit_index % 8));
+        }
+    }
+    
+    // Mark any kernel-used memory as allocated
+    extern char _kernel_start; // Defined in the linker script
+    uintptr_t kernel_start_page = (uintptr_t)&_kernel_start / PAGE_SIZE;
+    uintptr_t kernel_end_page = bitmap_start_page; // End includes the bitmap
+    
+    for (size_t page = kernel_start_page; page < kernel_end_page; page++) {
+        if (page < total_physical_pages) { // Ensure we don't exceed bitmap bounds
+            physical_bitmap[page / 8] |= (1 << (page % 8));
+        }
     }
     
     // Check if paging is enabled

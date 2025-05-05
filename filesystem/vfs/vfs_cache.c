@@ -264,9 +264,34 @@ int vfs_cache_read_block(uint32_t dev_id, uint32_t block_id, void* buffer) {
     block->dirty = 0;
     block->access_count = 1;
     
-    // This is where we'd read from the actual device
-    // For now, just zero the buffer as a placeholder
-    memset(block->data, 0, block->size);
+    // Get the block device for this device ID
+    vfs_block_device_t* device = vfs_get_block_device_by_id(dev_id);
+    if (!device) {
+        log_error("VFS: Failed to find block device %u", dev_id);
+        return VFS_ERR_INVALID_DEV;
+    }
+    
+    // Read the data from the actual device
+    if (!device->operations || !device->operations->read_blocks) {
+        log_error("VFS: Device %u missing read operations", dev_id);
+        return VFS_ERR_UNSUPPORTED;
+    }
+    
+    // Calculate device block number and count
+    uint64_t dev_block = block_id;
+    uint32_t dev_count = (block->size + device->block_size - 1) / device->block_size;
+    
+    // If device block size differs from cache block size, handle conversion
+    if (device->block_size != block->size) {
+        dev_block = (block_id * block->size) / device->block_size;
+    }
+    
+    // Read from device
+    int read_result = device->operations->read_blocks(device, dev_block, dev_count, block->data);
+    if (read_result != dev_count) {
+        log_error("VFS: Device %u read error: %d", dev_id, read_result);
+        return VFS_ERR_IO_ERROR;
+    }
     
     // Add to hash table
     uint32_t hash = cache_hash(dev_id, block_id);
@@ -592,8 +617,8 @@ static vfs_cache_block_t* cache_alloc_block(void) {
  * @param block Cache block
  */
 static void cache_mark_accessed(vfs_cache_block_t* block) {
-    // Update access timestamp
-    block->last_access = /* current time would be used here */0;
+    // Update access timestamp by getting the current system time
+    block->last_access = system_get_ticks();
     
     // If this is already the head, nothing to do
     if (block == lru_head) {
@@ -705,9 +730,44 @@ static int cache_writeback_block(vfs_cache_block_t* block) {
         return VFS_SUCCESS;
     }
     
-    // This is where we'd write to the actual device
-    // For now, just mark as clean
+    // Get the block device for this device ID
+    vfs_block_device_t* device = vfs_get_block_device_by_id(block->dev_id);
+    if (!device) {
+        log_error("VFS: Failed to find block device %u for writeback", block->dev_id);
+        return VFS_ERR_INVALID_DEV;
+    }
+    
+    // Check if device has write operations
+    if (!device->operations || !device->operations->write_blocks) {
+        log_error("VFS: Device %u missing write operations", block->dev_id);
+        // Still mark as clean to prevent repeated errors
+        block->dirty = 0;
+        return VFS_ERR_UNSUPPORTED;
+    }
+    
+    // Calculate device block number and count
+    uint64_t dev_block = block->block_id;
+    uint32_t dev_count = (block->size + device->block_size - 1) / device->block_size;
+    
+    // If device block size differs from cache block size, handle conversion
+    if (device->block_size != block->size) {
+        dev_block = (block->block_id * block->size) / device->block_size;
+    }
+    
+    // Write to device
+    int write_result = device->operations->write_blocks(device, dev_block, dev_count, block->data);
+    if (write_result != dev_count) {
+        log_error("VFS: Device %u write error: %d", block->dev_id, write_result);
+        return VFS_ERR_IO_ERROR;
+    }
+    
+    // Mark as clean
     block->dirty = 0;
+    
+    // Issue sync if device supports it and write caching is disabled
+    if (device->operations->sync && !(global_cache->flags & VFS_CACHE_FLAG_WRITE_CACHE)) {
+        device->operations->sync(device);
+    }
     
     cache_writebacks++;
     

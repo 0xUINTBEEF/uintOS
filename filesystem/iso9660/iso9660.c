@@ -399,278 +399,68 @@ int iso9660_parse_extended_name(const iso9660_directory_record_t* record, char* 
 
 // Read a raw sector from the device
 static int read_raw_sector(uint32_t sector, void* buffer) {
-    // In a real OS, this would use block device operations
-    // For this educational implementation, we'll simulate an ISO9660 file system in memory
+    // Use proper block device operations to read from the actual device
     
-    static int initialized = 0;
-    static uint8_t iso_image[32 * 1024 * 1024];  // 32MB simulated ISO image
-    
-    // Initialize ISO image with a basic ISO9660 structure on first use
-    if (!initialized) {
-        initialized = 1;
-        memset(iso_image, 0, sizeof(iso_image));
-        
-        // Create primary volume descriptor at sector 16
-        iso9660_volume_descriptor_t* pvd = (iso9660_volume_descriptor_t*)(iso_image + 16 * ISO9660_SECTOR_SIZE);
-        pvd->type = ISO9660_PRIMARY_DESCRIPTOR;
-        memcpy(pvd->id, ISO9660_STANDARD_ID, 5);
-        pvd->version = 1;
-        
-        // Fill in volume descriptor fields
-        memcpy(pvd->system_id, "UINTOS              ", 16);
-        memcpy(pvd->volume_id, "UINTOS_CDROM        ", 16);
-        
-        // Volume size (in sectors)
-        pvd->volume_space_size[0] = 8192; // Little endian
-        pvd->volume_space_size[1] = 0x0020; // Big endian (8192)
-        
-        // Logical block size
-        pvd->logical_block_size[0] = ISO9660_LOGICAL_BLOCK_SIZE;
-        pvd->logical_block_size[1] = 0x0008; // Big endian
-        
-        // Path table information
-        pvd->path_table_size[0] = 10;  // Size of path table
-        pvd->path_table_size[1] = 0x0A00; // Big endian
-        pvd->type_l_path_table = 18;  // Sector of path table
-        pvd->type_m_path_table = 0x1300; // Big endian
-        
-        // Create the root directory record
-        iso9660_directory_record_t* root_record = (iso9660_directory_record_t*)pvd->root_directory_record;
-        root_record->length = 34; // Size of directory record
-        root_record->ext_attr_length = 0;
-        root_record->extent_location[0] = 20; // Root directory starts at sector 20
-        root_record->extent_location[1] = 0x1400; // Big endian
-        root_record->data_length[0] = 2048; // Root directory size
-        root_record->data_length[1] = 0x0008; // Big endian
-        
-        // Date - May 2, 2025
-        root_record->recording_date[0] = 25;   // Years since 1900
-        root_record->recording_date[1] = 5;    // Month
-        root_record->recording_date[2] = 2;    // Day
-        root_record->recording_date[3] = 12;   // Hour
-        root_record->recording_date[4] = 0;    // Minute
-        root_record->recording_date[5] = 0;    // Second
-        root_record->recording_date[6] = 0;    // Timezone
-        
-        root_record->file_flags = ISO9660_ATTR_DIRECTORY;
-        root_record->file_unit_size = 0;
-        root_record->interleave_gap_size = 0;
-        root_record->volume_sequence_number[0] = 1;
-        root_record->volume_sequence_number[1] = 0x0100; // Big endian
-        root_record->filename_length = 1;
-        root_record->filename[0] = 0; // Root directory has a filename of 0x00
-        
-        // Set up Joliet supplementary volume descriptor at sector 17
-        iso9660_volume_descriptor_t* svd = (iso9660_volume_descriptor_t*)(iso_image + 17 * ISO9660_SECTOR_SIZE);
-        memcpy(svd, pvd, sizeof(iso9660_volume_descriptor_t));
-        svd->type = ISO9660_SUPPLEMENTARY_DESC;
-        
-        // Set Joliet escape sequence
-        svd->reserved3[0] = 0x25; // %
-        svd->reserved3[1] = 0x2F; // /
-        svd->reserved3[2] = 0x45; // E (Level 3)
-        
-        // Create volume descriptor set terminator at sector 18
-        iso9660_volume_descriptor_t* term = (iso9660_volume_descriptor_t*)(iso_image + 18 * ISO9660_SECTOR_SIZE);
-        term->type = ISO9660_TERMINATOR;
-        memcpy(term->id, ISO9660_STANDARD_ID, 5);
-        
-        // Create root directory entries at sector 20
-        uint8_t* root_dir = iso_image + 20 * ISO9660_SECTOR_SIZE;
-        iso9660_directory_record_t* dir_entry = (iso9660_directory_record_t*)root_dir;
-        
-        // Current directory entry (.)
-        dir_entry->length = 34; // Size of directory record
-        dir_entry->ext_attr_length = 0;
-        dir_entry->extent_location[0] = 20; // Points to itself
-        dir_entry->extent_location[1] = 0x1400; // Big endian
-        dir_entry->data_length[0] = 2048; // Directory size
-        dir_entry->data_length[1] = 0x0008; // Big endian
-        memcpy(dir_entry->recording_date, root_record->recording_date, 7);
-        dir_entry->file_flags = ISO9660_ATTR_DIRECTORY;
-        dir_entry->file_unit_size = 0;
-        dir_entry->interleave_gap_size = 0;
-        dir_entry->volume_sequence_number[0] = 1;
-        dir_entry->volume_sequence_number[1] = 0x0100; // Big endian
-        dir_entry->filename_length = 1;
-        dir_entry->filename[0] = 0; // '.' - Current directory
-        
-        // Parent directory entry (..)
-        dir_entry = (iso9660_directory_record_t*)(root_dir + dir_entry->length);
-        dir_entry->length = 34; // Size of directory record
-        dir_entry->ext_attr_length = 0;
-        dir_entry->extent_location[0] = 20; // For root, parent points to itself
-        dir_entry->extent_location[1] = 0x1400; // Big endian
-        dir_entry->data_length[0] = 2048; // Directory size
-        dir_entry->data_length[1] = 0x0008; // Big endian
-        memcpy(dir_entry->recording_date, root_record->recording_date, 7);
-        dir_entry->file_flags = ISO9660_ATTR_DIRECTORY;
-        dir_entry->file_unit_size = 0;
-        dir_entry->interleave_gap_size = 0;
-        dir_entry->volume_sequence_number[0] = 1;
-        dir_entry->volume_sequence_number[1] = 0x0100; // Big endian
-        dir_entry->filename_length = 1;
-        dir_entry->filename[0] = 1; // '..' - Parent directory
-        
-        // "README.TXT" file entry
-        dir_entry = (iso9660_directory_record_t*)(root_dir + 34 + 34);
-        dir_entry->length = 44; // Size of directory record + filename length + padding
-        dir_entry->ext_attr_length = 0;
-        dir_entry->extent_location[0] = 21; // File starts at sector 21
-        dir_entry->extent_location[1] = 0x1500; // Big endian
-        dir_entry->data_length[0] = 45; // File size
-        dir_entry->data_length[1] = 0x2D00; // Big endian
-        memcpy(dir_entry->recording_date, root_record->recording_date, 7);
-        dir_entry->file_flags = 0; // Regular file
-        dir_entry->file_unit_size = 0;
-        dir_entry->interleave_gap_size = 0;
-        dir_entry->volume_sequence_number[0] = 1;
-        dir_entry->volume_sequence_number[1] = 0x0100; // Big endian
-        dir_entry->filename_length = 12;
-        memcpy(dir_entry->filename, "README.TXT;1", 12); // ISO9660 filenames include version (;1)
-        
-        // Add "DOCS" directory entry
-        dir_entry = (iso9660_directory_record_t*)(root_dir + 34 + 34 + 44);
-        dir_entry->length = 38; // Size of directory record + filename length + padding
-        dir_entry->ext_attr_length = 0;
-        dir_entry->extent_location[0] = 22; // Directory starts at sector 22
-        dir_entry->extent_location[1] = 0x1600; // Big endian
-        dir_entry->data_length[0] = 2048; // Directory size
-        dir_entry->data_length[1] = 0x0008; // Big endian
-        memcpy(dir_entry->recording_date, root_record->recording_date, 7);
-        dir_entry->file_flags = ISO9660_ATTR_DIRECTORY; // Directory
-        dir_entry->file_unit_size = 0;
-        dir_entry->interleave_gap_size = 0;
-        dir_entry->volume_sequence_number[0] = 1;
-        dir_entry->volume_sequence_number[1] = 0x0100; // Big endian
-        dir_entry->filename_length = 5;
-        memcpy(dir_entry->filename, "DOCS", 4);
-        dir_entry->filename[4] = 0; // No extension
-        
-        // Create README.TXT content at sector 21
-        char* readme_content = "Welcome to the uintOS ISO9660 file system!\r\n";
-        memcpy(iso_image + 21 * ISO9660_SECTOR_SIZE, readme_content, strlen(readme_content));
-        
-        // Create DOCS directory entries at sector 22
-        uint8_t* docs_dir = iso_image + 22 * ISO9660_SECTOR_SIZE;
-        dir_entry = (iso9660_directory_record_t*)docs_dir;
-        
-        // Current directory entry (.)
-        dir_entry->length = 34;
-        dir_entry->ext_attr_length = 0;
-        dir_entry->extent_location[0] = 22; // Points to itself
-        dir_entry->extent_location[1] = 0x1600;
-        dir_entry->data_length[0] = 2048;
-        dir_entry->data_length[1] = 0x0008;
-        memcpy(dir_entry->recording_date, root_record->recording_date, 7);
-        dir_entry->file_flags = ISO9660_ATTR_DIRECTORY;
-        dir_entry->file_unit_size = 0;
-        dir_entry->interleave_gap_size = 0;
-        dir_entry->volume_sequence_number[0] = 1;
-        dir_entry->volume_sequence_number[1] = 0x0100;
-        dir_entry->filename_length = 1;
-        dir_entry->filename[0] = 0;
-        
-        // Parent directory entry (..)
-        dir_entry = (iso9660_directory_record_t*)(docs_dir + dir_entry->length);
-        dir_entry->length = 34;
-        dir_entry->ext_attr_length = 0;
-        dir_entry->extent_location[0] = 20; // Points to root directory
-        dir_entry->extent_location[1] = 0x1400;
-        dir_entry->data_length[0] = 2048;
-        dir_entry->data_length[1] = 0x0008;
-        memcpy(dir_entry->recording_date, root_record->recording_date, 7);
-        dir_entry->file_flags = ISO9660_ATTR_DIRECTORY;
-        dir_entry->file_unit_size = 0;
-        dir_entry->interleave_gap_size = 0;
-        dir_entry->volume_sequence_number[0] = 1;
-        dir_entry->volume_sequence_number[1] = 0x0100;
-        dir_entry->filename_length = 1;
-        dir_entry->filename[0] = 1;
-        
-        // "MANUAL.TXT" file entry
-        dir_entry = (iso9660_directory_record_t*)(docs_dir + 34 + 34);
-        dir_entry->length = 44;
-        dir_entry->ext_attr_length = 0;
-        dir_entry->extent_location[0] = 23; // File starts at sector 23
-        dir_entry->extent_location[1] = 0x1700;
-        dir_entry->data_length[0] = 32; // File size
-        dir_entry->data_length[1] = 0x2000;
-        memcpy(dir_entry->recording_date, root_record->recording_date, 7);
-        dir_entry->file_flags = 0; // Regular file
-        dir_entry->file_unit_size = 0;
-        dir_entry->interleave_gap_size = 0;
-        dir_entry->volume_sequence_number[0] = 1;
-        dir_entry->volume_sequence_number[1] = 0x0100;
-        dir_entry->filename_length = 12;
-        memcpy(dir_entry->filename, "MANUAL.TXT;1", 12);
-        
-        // Create MANUAL.TXT content at sector 23
-        char* manual_content = "uintOS User Manual\r\nVersion 1.0\r\n";
-        memcpy(iso_image + 23 * ISO9660_SECTOR_SIZE, manual_content, strlen(manual_content));
-        
-        // Create a boot record at sector 19 (El Torito)
-        iso9660_volume_descriptor_t* boot_rec = (iso9660_volume_descriptor_t*)(iso_image + 19 * ISO9660_SECTOR_SIZE);
-        boot_rec->type = ISO9660_BOOT_RECORD;
-        memcpy(boot_rec->id, ISO9660_STANDARD_ID, 5);
-        boot_rec->version = 1;
-        memcpy(boot_rec->system_id, "EL TORITO SPECIFICATION", 23);
-        
-        // Boot catalog pointer (sector 24)
-        uint32_t* catalog_sector = (uint32_t*)boot_rec->application_data;
-        *catalog_sector = 24;
-        
-        // Create boot catalog at sector 24
-        uint8_t* boot_catalog = iso_image + 24 * ISO9660_SECTOR_SIZE;
-        
-        // Validation entry
-        struct {
-            uint8_t header_id;
-            uint8_t platform_id;
-            uint16_t reserved;
-            char id_string[24];
-            uint16_t checksum;
-            uint8_t key55;
-            uint8_t keyAA;
-        } __attribute__((packed)) *catalog_header = (void*)boot_catalog;
-        
-        catalog_header->header_id = 1;
-        catalog_header->platform_id = 0; // 80x86
-        memcpy(catalog_header->id_string, "uintOS Bootable CD      ", 24);
-        catalog_header->checksum = 0;  // Normally would be calculated
-        catalog_header->key55 = 0x55;
-        catalog_header->keyAA = 0xAA;
-        
-        // Initial/Default entry
-        struct {
-            uint8_t boot_indicator;
-            uint8_t boot_media_type;
-            uint16_t load_segment;
-            uint8_t system_type;
-            uint8_t reserved;
-            uint16_t sector_count;
-            uint32_t load_rba;
-            uint8_t reserved2[20];
-        } __attribute__((packed)) *boot_entry = (void*)(boot_catalog + 32);
-        
-        boot_entry->boot_indicator = 0x88; // Bootable
-        boot_entry->boot_media_type = 0; // No emulation
-        boot_entry->load_segment = 0; // Default
-        boot_entry->system_type = 0;
-        boot_entry->sector_count = 2; // 2 sectors (1KB)
-        boot_entry->load_rba = 25; // Boot image at sector 25
-        
-        // Create a simple boot image at sector 25
-        uint8_t* boot_image = iso_image + 25 * ISO9660_SECTOR_SIZE;
-        memcpy(boot_image, "UINTOS BOOTABLE CD - SIMULATED BOOT IMAGE", 40);
-    }
-
-    // Read the requested sector from our in-memory image
-    if (sector * ISO9660_SECTOR_SIZE >= sizeof(iso_image)) {
-        return ISO9660_ERR_IO_ERROR;  // Out of bounds
+    // Check if the device path is valid
+    if (!device_path) {
+        log_error("ISO9660", "No device path specified");
+        return ISO9660_ERR_IO_ERROR;
     }
     
-    memcpy(buffer, iso_image + sector * ISO9660_SECTOR_SIZE, ISO9660_SECTOR_SIZE);
+    // Get the block device interface from the VFS
+    vfs_block_device_t* block_dev = vfs_get_block_device(device_path);
+    if (!block_dev) {
+        log_error("ISO9660", "Failed to get block device: %s", device_path);
+        return ISO9660_ERR_IO_ERROR;
+    }
+    
+    // Ensure the block device has the necessary operations
+    if (!block_dev->operations || !block_dev->operations->read_blocks) {
+        log_error("ISO9660", "Block device missing required operations");
+        return ISO9660_ERR_IO_ERROR;
+    }
+    
+    // Calculate LBA (Logical Block Address) for the device
+    // For ISO9660, sector size is 2048 bytes, but the device may have a different block size
+    uint64_t lba = sector;
+    if (block_dev->block_size != ISO9660_SECTOR_SIZE) {
+        // Convert ISO sector to device blocks
+        lba = (sector * ISO9660_SECTOR_SIZE) / block_dev->block_size;
+    }
+    
+    // Calculate how many device blocks we need to read
+    uint32_t blocks_to_read = (ISO9660_SECTOR_SIZE + block_dev->block_size - 1) / block_dev->block_size;
+    
+    // For devices with block size < ISO9660_SECTOR_SIZE, we might need a temporary buffer
+    void* read_buffer = buffer;
+    
+    if (block_dev->block_size < ISO9660_SECTOR_SIZE && blocks_to_read > 1) {
+        // Allocate a temporary aligned buffer for the read
+        read_buffer = malloc(blocks_to_read * block_dev->block_size);
+        if (!read_buffer) {
+            log_error("ISO9660", "Failed to allocate read buffer");
+            return ISO9660_ERR_IO_ERROR;
+        }
+    }
+    
+    // Read the sector data from the block device
+    int result = block_dev->operations->read_blocks(block_dev, lba, blocks_to_read, read_buffer);
+    
+    // Check for read errors
+    if (result != blocks_to_read) {
+        log_error("ISO9660", "Block device read error: %d", result);
+        if (read_buffer != buffer) {
+            free(read_buffer);
+        }
+        return ISO9660_ERR_IO_ERROR;
+    }
+    
+    // If we used a temporary buffer, copy the data to the caller's buffer
+    if (read_buffer != buffer) {
+        memcpy(buffer, read_buffer, ISO9660_SECTOR_SIZE);
+        free(read_buffer);
+    }
+    
     return 0;  // Success
 }
 

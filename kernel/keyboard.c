@@ -130,11 +130,33 @@ char keyboard_read_key() {
 
 // Wait for a keypress and return it (blocking)
 char keyboard_wait_key() {
-    while (!is_key_available()) {
-        // Wait for a key to be available
-        // In a real OS, we would use a proper wait mechanism
-        // or yield to other tasks here
+    // First check if a key is already available
+    if (is_key_available()) {
+        return keyboard_read_key();
     }
+
+    // Import thread sleep functionality
+    #include "thread.h"
+    #include "scheduler.h"
+    
+    // Set up a wait condition for the keyboard
+    while (!is_key_available()) {
+        // Yield CPU time to other tasks
+        thread_yield();
+        
+        // If we're in an interrupt context where thread_yield() isn't appropriate,
+        // use a short delay to avoid CPU hogging
+        if (in_interrupt_context()) {
+            // Short delay using a timer-based approach rather than busy waiting
+            cpu_pause_short();
+        } else {
+            // Sleep for a short time to avoid busy-waiting
+            // This allows other threads to run while waiting for input
+            thread_sleep(10); // Sleep for 10ms
+        }
+    }
+    
+    // A key is now available
     return keyboard_read_key();
 }
 
