@@ -139,20 +139,161 @@ int ext2_write_file(const char* path, const char* buffer, int size, int flags) {
     uint32_t inode_num = path_to_inode(path);
     
     // If file doesn't exist and we're not creating it, return error
-    if (inode_num == 0 && !(flags & 1)) { // 1 = create flag
+    if (inode_num == 0 && !(flags & EXT2_WRITE_CREATE)) {
         return EXT2_ERR_NOT_FOUND;
     }
     
-    // Implementation would include:
-    // 1. If creating new file: allocate inode, create directory entry
-    // 2. If file exists: potentially truncate if flag set
-    // 3. Allocate blocks as needed
-    // 4. Write data to blocks
-    // 5. Update inode size and block pointers
-    // 6. Update superblock and group descriptors
+    ext2_inode_t inode;
+    char dir_path[VFS_MAX_PATH];
+    char filename[VFS_MAX_PATH];
     
-    // For this educational implementation, we'll just return a success code
-    return size;
+    // If we need to create the file
+    if (inode_num == 0) {
+        // Parse path to get directory and filename
+        if (parse_path(path, dir_path, filename) != 0) {
+            return EXT2_ERR_INVALID_ARG;
+        }
+        
+        // Get the parent directory inode
+        uint32_t dir_inode_num = path_to_inode(dir_path);
+        if (dir_inode_num == 0) {
+            return EXT2_ERR_NOT_FOUND;
+        }
+        
+        // Read parent directory inode
+        ext2_inode_t dir_inode;
+        if (read_inode(dir_inode_num, &dir_inode) != 0) {
+            return EXT2_ERR_IO_ERROR;
+        }
+        
+        // Check if it's a directory
+        if ((dir_inode.mode & EXT2_S_IFMT) != EXT2_S_IFDIR) {
+            return EXT2_ERR_INVALID_ARG;
+        }
+        
+        // Allocate new inode
+        inode_num = ext2_allocate_inode();
+        if (inode_num == 0) {
+            return EXT2_ERR_NO_SPACE;
+        }
+        
+        // Initialize the new inode
+        memset(&inode, 0, sizeof(ext2_inode_t));
+        inode.mode = EXT2_S_IFREG | 0644; // Regular file with rw-r--r-- permissions
+        inode.uid = 0;  // Default to root user
+        inode.gid = 0;  // Default to root group
+        inode.size = 0;
+        inode.atime = inode.ctime = inode.mtime = get_current_time();
+        inode.links_count = 1;
+        
+        // Add entry to parent directory
+        int result = ext2_add_dir_entry(dir_inode_num, &dir_inode, filename, inode_num, EXT2_FT_REG_FILE);
+        if (result != 0) {
+            // Free the allocated inode and return error
+            ext2_free_inode(inode_num);
+            return result;
+        }
+        
+        // Update directory's modification time
+        dir_inode.mtime = get_current_time();
+        if (write_inode(dir_inode_num, &dir_inode) != 0) {
+            return EXT2_ERR_IO_ERROR;
+        }
+    } else {
+        // Read the existing inode
+        if (read_inode(inode_num, &inode) != 0) {
+            return EXT2_ERR_IO_ERROR;
+        }
+        
+        // Check if it's a regular file
+        if ((inode.mode & EXT2_S_IFMT) != EXT2_S_IFREG) {
+            return EXT2_ERR_INVALID_ARG;
+        }
+        
+        // If truncate flag is set, free all existing blocks
+        if (flags & EXT2_WRITE_TRUNCATE) {
+            // Free all blocks associated with this file
+            ext2_free_file_blocks(&inode);
+            
+            // Reset size to 0
+            inode.size = 0;
+            
+            // Update block pointers
+            memset(inode.block, 0, sizeof(inode.block));
+        }
+    }
+    
+    // Calculate how many blocks we need
+    uint32_t bytes_to_write = size;
+    uint32_t bytes_written = 0;
+    uint32_t blocks_needed = (bytes_to_write + block_size - 1) / block_size;
+    uint32_t block_index = 0;
+    
+    // Write data block by block
+    while (bytes_written < (uint32_t)size) {
+        // Allocate or get a block for this position
+        uint32_t block_num = ext2_get_or_allocate_block(&inode, block_index);
+        if (block_num == 0) {
+            // Could not allocate block
+            break;
+        }
+        
+        // Calculate how many bytes to write to this block
+        uint32_t block_offset = bytes_written % block_size;
+        uint32_t bytes_this_block = block_size - block_offset;
+        if (bytes_this_block > (size - bytes_written)) {
+            bytes_this_block = size - bytes_written;
+        }
+        
+        // If we're not writing a full block or not starting at the beginning,
+        // we need to do a read-modify-write cycle
+        uint8_t block_buffer[4096]; // Max block size
+        if (block_offset > 0 || bytes_this_block < block_size) {
+            if (read_block(block_num, block_buffer) != 0) {
+                break;
+            }
+        }
+        
+        // Copy data to the block buffer
+        memcpy(block_buffer + block_offset, buffer + bytes_written, bytes_this_block);
+        
+        // Write the block
+        if (write_block(block_num, block_buffer) != 0) {
+            break;
+        }
+        
+        // Update counters
+        bytes_written += bytes_this_block;
+        block_index++;
+    }
+    
+    // Update inode size if we've written data that extends the file
+    if (bytes_written > 0) {
+        uint32_t new_size;
+        
+        if (flags & EXT2_WRITE_APPEND) {
+            new_size = inode.size + bytes_written;
+        } else {
+            new_size = bytes_written;
+        }
+        
+        if (new_size > inode.size) {
+            inode.size = new_size;
+        }
+        
+        // Update timestamps
+        inode.mtime = inode.atime = get_current_time();
+        
+        // Write the updated inode
+        if (write_inode(inode_num, &inode) != 0) {
+            return EXT2_ERR_IO_ERROR;
+        }
+    }
+    
+    // Update filesystem metadata (superblock, group descriptors)
+    ext2_update_fs_metadata();
+    
+    return bytes_written;
 }
 
 int ext2_list_directory(const char* path, ext2_file_entry_t* entries, int max_entries) {
@@ -261,35 +402,343 @@ int ext2_get_file_size(const char* path) {
 }
 
 int ext2_mkdir(const char* path, uint16_t mode) {
-    // This is a simplified placeholder
-    // A real implementation would:
-    // 1. Find parent directory inode
-    // 2. Allocate new inode for the directory
-    // 3. Initialize the directory with "." and ".." entries
-    // 4. Create directory entry in parent directory
+    // Parse path to get directory and filename
+    char dir_path[VFS_MAX_PATH];
+    char dirname[VFS_MAX_PATH];
     
-    return EXT2_ERR_NOT_FOUND;
+    if (parse_path(path, dir_path, dirname) != 0) {
+        return EXT2_ERR_INVALID_ARG;
+    }
+    
+    // Check if the directory already exists
+    if (ext2_file_exists(path)) {
+        return EXT2_ERR_EXISTS;
+    }
+    
+    // Get the parent directory inode
+    uint32_t parent_inode_num = path_to_inode(dir_path);
+    if (parent_inode_num == 0) {
+        return EXT2_ERR_NOT_FOUND;
+    }
+    
+    // Read parent directory inode
+    ext2_inode_t parent_inode;
+    if (read_inode(parent_inode_num, &parent_inode) != 0) {
+        return EXT2_ERR_IO_ERROR;
+    }
+    
+    // Check if parent is a directory
+    if ((parent_inode.mode & EXT2_S_IFMT) != EXT2_S_IFDIR) {
+        return EXT2_ERR_NOT_DIR;
+    }
+    
+    // Allocate a new inode for the directory
+    uint32_t new_inode_num = ext2_allocate_inode();
+    if (new_inode_num == 0) {
+        return EXT2_ERR_NO_SPACE;
+    }
+    
+    // Initialize the new directory inode
+    ext2_inode_t new_inode;
+    memset(&new_inode, 0, sizeof(ext2_inode_t));
+    new_inode.mode = EXT2_S_IFDIR | (mode & 0xFFF); // Directory with specified permissions
+    new_inode.uid = 0;  // Default to root user
+    new_inode.gid = 0;  // Default to root group
+    new_inode.size = 0;
+    new_inode.atime = new_inode.ctime = new_inode.mtime = get_current_time();
+    new_inode.links_count = 2; // "." + parent's entry
+    
+    // Allocate first block for the directory
+    uint32_t new_block = ext2_allocate_block();
+    if (new_block == 0) {
+        ext2_free_inode(new_inode_num);
+        return EXT2_ERR_NO_SPACE;
+    }
+    
+    // Set the block in the inode
+    new_inode.block[0] = new_block;
+    
+    // Create the "." and ".." entries in the new directory
+    uint8_t block_buffer[4096]; // Max block size
+    memset(block_buffer, 0, block_size);
+    
+    // Create "." entry (points to itself)
+    ext2_dir_entry_t* dot_entry = (ext2_dir_entry_t*)block_buffer;
+    dot_entry->inode = new_inode_num;
+    dot_entry->rec_len = 12; // 8 bytes for header + 1 byte for name + padding for 4-byte alignment
+    dot_entry->name_len = 1;
+    dot_entry->file_type = EXT2_FT_DIR;
+    strcpy(dot_entry->name, ".");
+    
+    // Create ".." entry (points to parent)
+    ext2_dir_entry_t* dotdot_entry = (ext2_dir_entry_t*)(block_buffer + dot_entry->rec_len);
+    dotdot_entry->inode = parent_inode_num;
+    dotdot_entry->rec_len = block_size - dot_entry->rec_len; // Use rest of block
+    dotdot_entry->name_len = 2;
+    dotdot_entry->file_type = EXT2_FT_DIR;
+    strcpy(dotdot_entry->name, "..");
+    
+    // Write the block
+    if (write_block(new_block, block_buffer) != 0) {
+        ext2_free_block(new_block);
+        ext2_free_inode(new_inode_num);
+        return EXT2_ERR_IO_ERROR;
+    }
+    
+    // Update new directory inode size
+    new_inode.size = block_size;
+    
+    // Write the new inode
+    if (write_inode(new_inode_num, &new_inode) != 0) {
+        ext2_free_block(new_block);
+        ext2_free_inode(new_inode_num);
+        return EXT2_ERR_IO_ERROR;
+    }
+    
+    // Add directory entry in the parent directory
+    int add_result = ext2_add_dir_entry(parent_inode_num, &parent_inode, dirname, 
+                                         new_inode_num, EXT2_FT_DIR);
+    
+    if (add_result != 0) {
+        ext2_free_block(new_block);
+        ext2_free_inode(new_inode_num);
+        return add_result;
+    }
+    
+    // Increment link count of parent directory (for the ".." entry)
+    parent_inode.links_count++;
+    parent_inode.mtime = get_current_time();
+    
+    // Write the updated parent inode
+    if (write_inode(parent_inode_num, &parent_inode) != 0) {
+        return EXT2_ERR_IO_ERROR;
+    }
+    
+    // Update filesystem metadata
+    ext2_update_fs_metadata();
+    
+    return EXT2_SUCCESS;
 }
 
 int ext2_remove(const char* path) {
-    // This is a simplified placeholder
-    // A real implementation would:
-    // 1. Find the inode for the file/directory
-    // 2. If directory, ensure it's empty
-    // 3. Remove the directory entry
-    // 4. Decrement links count, free inode if zero
-    // 5. Free data blocks
+    // Get the inode number for the path
+    uint32_t inode_num = path_to_inode(path);
+    if (inode_num == 0) {
+        return EXT2_ERR_NOT_FOUND;
+    }
     
-    return EXT2_ERR_NOT_FOUND;
+    // Read the inode
+    ext2_inode_t inode;
+    if (read_inode(inode_num, &inode) != 0) {
+        return EXT2_ERR_IO_ERROR;
+    }
+    
+    // Parse path to get directory and filename
+    char dir_path[VFS_MAX_PATH];
+    char filename[VFS_MAX_PATH];
+    
+    if (parse_path(path, dir_path, filename) != 0) {
+        return EXT2_ERR_INVALID_ARG;
+    }
+    
+    // Get the parent directory inode
+    uint32_t parent_inode_num = path_to_inode(dir_path);
+    if (parent_inode_num == 0) {
+        return EXT2_ERR_NOT_FOUND;
+    }
+    
+    // Read parent directory inode
+    ext2_inode_t parent_inode;
+    if (read_inode(parent_inode_num, &parent_inode) != 0) {
+        return EXT2_ERR_IO_ERROR;
+    }
+    
+    // Check if it's a directory and if so, ensure it's empty
+    if ((inode.mode & EXT2_S_IFMT) == EXT2_S_IFDIR) {
+        // Cannot remove "." or ".."
+        if (strcmp(filename, ".") == 0 || strcmp(filename, "..") == 0) {
+            return EXT2_ERR_PERMISSION;
+        }
+        
+        // Check if the directory is empty
+        ext2_file_entry_t entries[2];
+        int entry_count = ext2_list_directory(path, entries, 2);
+        
+        if (entry_count > 0) {
+            return EXT2_ERR_NOT_EMPTY;
+        }
+        
+        // Decrement parent's link count (for the ".." entry)
+        parent_inode.links_count--;
+    }
+    
+    // Remove directory entry from parent
+    int remove_result = ext2_remove_dir_entry(parent_inode_num, &parent_inode, filename);
+    if (remove_result != 0) {
+        return remove_result;
+    }
+    
+    // Update parent's modification time
+    parent_inode.mtime = get_current_time();
+    
+    // Write the updated parent inode
+    if (write_inode(parent_inode_num, &parent_inode) != 0) {
+        return EXT2_ERR_IO_ERROR;
+    }
+    
+    // Decrement inode's link count
+    inode.links_count--;
+    
+    // If link count reaches zero, free the inode and its blocks
+    if (inode.links_count == 0) {
+        // Free all blocks associated with the inode
+        ext2_free_file_blocks(&inode);
+        
+        // Free the inode
+        ext2_free_inode(inode_num);
+    } else {
+        // Write the updated inode
+        if (write_inode(inode_num, &inode) != 0) {
+            return EXT2_ERR_IO_ERROR;
+        }
+    }
+    
+    // Update filesystem metadata
+    ext2_update_fs_metadata();
+    
+    return EXT2_SUCCESS;
 }
 
 int ext2_symlink(const char* target, const char* linkpath) {
-    // This is a simplified placeholder
-    // A real implementation would:
-    // 1. Create a new file at linkpath with mode set to symbolic link
-    // 2. Write the target path as the file contents
+    // Parse path to get directory and filename for the link
+    char dir_path[VFS_MAX_PATH];
+    char link_name[VFS_MAX_PATH];
     
-    return EXT2_ERR_NOT_FOUND;
+    if (parse_path(linkpath, dir_path, link_name) != 0) {
+        return EXT2_ERR_INVALID_ARG;
+    }
+    
+    // Check if the symlink already exists
+    if (ext2_file_exists(linkpath)) {
+        return EXT2_ERR_EXISTS;
+    }
+    
+    // Get the parent directory inode
+    uint32_t parent_inode_num = path_to_inode(dir_path);
+    if (parent_inode_num == 0) {
+        return EXT2_ERR_NOT_FOUND;
+    }
+    
+    // Read parent directory inode
+    ext2_inode_t parent_inode;
+    if (read_inode(parent_inode_num, &parent_inode) != 0) {
+        return EXT2_ERR_IO_ERROR;
+    }
+    
+    // Check if parent is a directory
+    if ((parent_inode.mode & EXT2_S_IFMT) != EXT2_S_IFDIR) {
+        return EXT2_ERR_NOT_DIR;
+    }
+    
+    // Allocate a new inode for the symlink
+    uint32_t symlink_inode_num = ext2_allocate_inode();
+    if (symlink_inode_num == 0) {
+        return EXT2_ERR_NO_SPACE;
+    }
+    
+    // Initialize the symlink inode
+    ext2_inode_t symlink_inode;
+    memset(&symlink_inode, 0, sizeof(ext2_inode_t));
+    symlink_inode.mode = EXT2_S_IFLNK | 0777; // Symlink with full permissions
+    symlink_inode.uid = 0;  // Default to root user
+    symlink_inode.gid = 0;  // Default to root group
+    symlink_inode.size = strlen(target);
+    symlink_inode.atime = symlink_inode.ctime = symlink_inode.mtime = get_current_time();
+    symlink_inode.links_count = 1;
+    
+    // In EXT2, if the symlink target is small enough (<= 60 bytes),
+    // it's stored directly in the inode's block pointers (fast symlinks)
+    if (symlink_inode.size <= 60) {
+        // Copy target path directly into the block pointers
+        strcpy((char*)symlink_inode.block, target);
+    } else {
+        // For larger targets, allocate blocks and store the path there
+        uint32_t blocks_needed = (symlink_inode.size + block_size - 1) / block_size;
+        
+        // Allocate blocks and store the target path
+        for (uint32_t i = 0; i < blocks_needed; i++) {
+            uint32_t block_num = ext2_allocate_block();
+            if (block_num == 0) {
+                // Free previously allocated blocks
+                for (uint32_t j = 0; j < i; j++) {
+                    ext2_free_block(symlink_inode.block[j]);
+                }
+                ext2_free_inode(symlink_inode_num);
+                return EXT2_ERR_NO_SPACE;
+            }
+            
+            // Set block pointer in inode
+            symlink_inode.block[i] = block_num;
+            
+            // Calculate bytes to write to this block
+            uint32_t offset = i * block_size;
+            uint32_t bytes_this_block = block_size;
+            if (offset + bytes_this_block > symlink_inode.size) {
+                bytes_this_block = symlink_inode.size - offset;
+            }
+            
+            // Prepare block buffer
+            uint8_t block_buffer[4096]; // Max block size
+            memset(block_buffer, 0, block_size);
+            memcpy(block_buffer, target + offset, bytes_this_block);
+            
+            // Write the block
+            if (write_block(block_num, block_buffer) != 0) {
+                // Free allocated blocks
+                for (uint32_t j = 0; j <= i; j++) {
+                    ext2_free_block(symlink_inode.block[j]);
+                }
+                ext2_free_inode(symlink_inode_num);
+                return EXT2_ERR_IO_ERROR;
+            }
+        }
+    }
+    
+    // Write the inode
+    if (write_inode(symlink_inode_num, &symlink_inode) != 0) {
+        // Free all blocks if we allocated them
+        if (symlink_inode.size > 60) {
+            ext2_free_file_blocks(&symlink_inode);
+        }
+        ext2_free_inode(symlink_inode_num);
+        return EXT2_ERR_IO_ERROR;
+    }
+    
+    // Add entry to parent directory
+    int result = ext2_add_dir_entry(parent_inode_num, &parent_inode, link_name, 
+                                   symlink_inode_num, EXT2_FT_SYMLINK);
+    
+    if (result != 0) {
+        // Free all blocks if we allocated them
+        if (symlink_inode.size > 60) {
+            ext2_free_file_blocks(&symlink_inode);
+        }
+        ext2_free_inode(symlink_inode_num);
+        return result;
+    }
+    
+    // Update parent's modification time
+    parent_inode.mtime = get_current_time();
+    
+    // Write the parent inode
+    if (write_inode(parent_inode_num, &parent_inode) != 0) {
+        return EXT2_ERR_IO_ERROR;
+    }
+    
+    // Update filesystem metadata
+    ext2_update_fs_metadata();
+    
+    return EXT2_SUCCESS;
 }
 
 int ext2_readlink(const char* path, char* buffer, int size) {

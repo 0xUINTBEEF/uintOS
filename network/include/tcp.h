@@ -127,6 +127,17 @@ typedef struct tcp_listener {
 } tcp_listener_t;
 
 /**
+ * TCP buffer structure for receive buffer
+ */
+typedef struct tcp_buffer {
+    uint8_t* data;           // Buffer data
+    uint32_t size;           // Total buffer size
+    uint32_t start;          // Start position for reading
+    uint32_t end;            // End position for writing
+    uint32_t bytes_available; // Number of bytes available to read
+} tcp_buffer_t;
+
+/**
  * TCP socket structure
  */
 typedef struct tcp_socket {
@@ -145,9 +156,8 @@ typedef struct tcp_socket {
     // Socket queue (linked list)
     struct tcp_socket* next;   // Next socket in list
     
-    // Data buffers
-    net_buffer_t* send_buffer; // Data waiting to be sent
-    net_buffer_t* recv_buffer; // Received data waiting to be read
+    // Receive buffer
+    tcp_buffer_t rx_buffer;    // Circular buffer for received data
     
     // Callbacks
     void (*connected_callback)(struct tcp_socket* socket);

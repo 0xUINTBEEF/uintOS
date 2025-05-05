@@ -32,6 +32,130 @@ static uint32_t tcp_initial_seq = 0;
 #define TCP_RETRANSMIT_TIMEOUT 500      // Initial retransmission timeout (ms)
 #define TCP_MAX_RETRANSMITS 5           // Maximum retransmission attempts
 
+#define TCP_DEFAULT_BUFFER_SIZE 8192  // Default buffer size (8KB)
+
+// Structure for TCP receive buffer
+typedef struct {
+    uint8_t* data;           // Buffer data
+    uint32_t size;           // Total buffer size
+    uint32_t start;          // Start position for reading
+    uint32_t end;            // End position for writing
+    uint32_t bytes_available; // Number of bytes available to read
+} tcp_buffer_t;
+
+// Initialize a TCP receive buffer
+static int tcp_buffer_init(tcp_socket_t* socket, uint32_t size) {
+    if (!socket) return -1;
+    
+    // Allocate buffer memory
+    socket->rx_buffer.data = malloc(size);
+    if (!socket->rx_buffer.data) {
+        log_error("NET", "Failed to allocate TCP receive buffer");
+        return -1;
+    }
+    
+    // Initialize buffer state
+    socket->rx_buffer.size = size;
+    socket->rx_buffer.start = 0;
+    socket->rx_buffer.end = 0;
+    socket->rx_buffer.bytes_available = 0;
+    
+    return 0;
+}
+
+// Write data to the TCP receive buffer
+static int tcp_buffer_write(tcp_socket_t* socket, const uint8_t* data, uint32_t len) {
+    if (!socket || !socket->rx_buffer.data || !data) return -1;
+    
+    // Check if there's enough space
+    if (socket->rx_buffer.bytes_available + len > socket->rx_buffer.size) {
+        log_warning("NET", "TCP receive buffer overflow, dropping data");
+        return -1;
+    }
+    
+    // Copy data to buffer, handling wrap-around
+    for (uint32_t i = 0; i < len; i++) {
+        socket->rx_buffer.data[socket->rx_buffer.end] = data[i];
+        socket->rx_buffer.end = (socket->rx_buffer.end + 1) % socket->rx_buffer.size;
+    }
+    
+    // Update available bytes count
+    socket->rx_buffer.bytes_available += len;
+    
+    return len;
+}
+
+// Read data from the TCP receive buffer
+static int tcp_buffer_read(tcp_socket_t* socket, uint8_t* data, uint32_t len) {
+    if (!socket || !socket->rx_buffer.data || !data) return -1;
+    
+    // Determine how much data we can actually read
+    uint32_t read_len = len;
+    if (read_len > socket->rx_buffer.bytes_available) {
+        read_len = socket->rx_buffer.bytes_available;
+    }
+    
+    // No data available
+    if (read_len == 0) return 0;
+    
+    // Copy data from buffer, handling wrap-around
+    for (uint32_t i = 0; i < read_len; i++) {
+        data[i] = socket->rx_buffer.data[socket->rx_buffer.start];
+        socket->rx_buffer.start = (socket->rx_buffer.start + 1) % socket->rx_buffer.size;
+    }
+    
+    // Update available bytes count
+    socket->rx_buffer.bytes_available -= read_len;
+    
+    return read_len;
+}
+
+// Peek at data in the buffer without removing it
+static int tcp_buffer_peek(tcp_socket_t* socket, uint8_t* data, uint32_t len) {
+    if (!socket || !socket->rx_buffer.data || !data) return -1;
+    
+    // Determine how much data we can actually read
+    uint32_t read_len = len;
+    if (read_len > socket->rx_buffer.bytes_available) {
+        read_len = socket->rx_buffer.bytes_available;
+    }
+    
+    // No data available
+    if (read_len == 0) return 0;
+    
+    // Copy data from buffer without updating pointers
+    uint32_t pos = socket->rx_buffer.start;
+    for (uint32_t i = 0; i < read_len; i++) {
+        data[i] = socket->rx_buffer.data[pos];
+        pos = (pos + 1) % socket->rx_buffer.size;
+    }
+    
+    return read_len;
+}
+
+// Free the TCP receive buffer
+static void tcp_buffer_free(tcp_socket_t* socket) {
+    if (!socket || !socket->rx_buffer.data) return;
+    
+    free(socket->rx_buffer.data);
+    socket->rx_buffer.data = NULL;
+    socket->rx_buffer.size = 0;
+    socket->rx_buffer.start = 0;
+    socket->rx_buffer.end = 0;
+    socket->rx_buffer.bytes_available = 0;
+}
+
+// Structure to track TIME_WAIT state
+typedef struct {
+    uint32_t start_time;     // When the timer started
+    uint32_t duration;       // How long to stay in TIME_WAIT (2*MSL)
+    tcp_socket_t* socket;    // The socket that is in TIME_WAIT
+} tcp_time_wait_t;
+
+// Array of TIME_WAIT timers
+#define TCP_MAX_TIME_WAIT_SOCKETS 32
+static tcp_time_wait_t time_wait_sockets[TCP_MAX_TIME_WAIT_SOCKETS];
+
 /**
  * Initialize the TCP protocol handler
  */
@@ -42,6 +166,9 @@ int tcp_init() {
     for (int i = 0; i < TCP_MAX_SOCKETS; i++) {
         tcp_sockets[i].state = TCP_STATE_CLOSED;
     }
+    
+    // Initialize the TIME_WAIT tracker
+    tcp_init_time_wait();
     
     // Register TCP as a protocol handler with IP
     int result = ip_register_protocol(IP_PROTO_TCP, tcp_rx);
@@ -57,6 +184,49 @@ int tcp_init() {
     
     log_info("NET", "TCP protocol handler initialized successfully");
     return 0;
+}
+
+/**
+ * Initialize the TIME_WAIT tracker
+ */
+static void tcp_init_time_wait() {
+    for (int i = 0; i < TCP_MAX_TIME_WAIT_SOCKETS; i++) {
+        time_wait_sockets[i].socket = NULL;
+    }
+}
+
+/**
+ * Start a TIME_WAIT timer for a socket
+ */
+static void tcp_start_time_wait(tcp_socket_t* socket) {
+    if (socket == NULL) {
+        return;
+    }
+    
+    // Find an empty slot
+    int slot = -1;
+    for (int i = 0; i < TCP_MAX_TIME_WAIT_SOCKETS; i++) {
+        if (time_wait_sockets[i].socket == NULL) {
+            slot = i;
+            break;
+        }
+    }
+    
+    if (slot == -1) {
+        log_warning("NET", "No free TIME_WAIT slots, closing socket immediately");
+        socket->state = TCP_STATE_CLOSED;
+        return;
+    }
+    
+    // Setup the TIME_WAIT timer
+    time_wait_sockets[slot].socket = socket;
+    time_wait_sockets[slot].start_time = network_get_time_ms();
+    time_wait_sockets[slot].duration = 2 * TCP_MSL; // 2*MSL as required by TCP spec
+    
+    char addr_str[16];
+    ipv4_to_str(&socket->remote_addr, addr_str);
+    log_info("NET", "TCP connection to %s:%u entered TIME_WAIT state", 
+             addr_str, socket->remote_port);
 }
 
 /**
@@ -284,6 +454,12 @@ static int tcp_process_syn(tcp_socket_t* listening_socket,
     new_socket->conn.retransmit.rto = TCP_RETRANSMIT_TIMEOUT;
     new_socket->conn.retransmit.attempts = 0;
     
+    // Initialize receive buffer
+    if (tcp_buffer_init(new_socket, TCP_DEFAULT_BUFFER_SIZE) != 0) {
+        log_error("NET", "Failed to initialize TCP receive buffer");
+        return -1;
+    }
+    
     // Add to the pending connections list
     new_socket->next = listening_socket->listener->pending_connections;
     listening_socket->listener->pending_connections = new_socket;
@@ -345,7 +521,7 @@ static int tcp_process_ack(tcp_socket_t* socket, uint32_t ack_num, uint16_t wind
         case TCP_STATE_CLOSING:
             // FIN acknowledged
             socket->state = TCP_STATE_TIME_WAIT;
-            // TODO: Start TIME_WAIT timer
+            tcp_start_time_wait(socket);
             return 0;
             
         case TCP_STATE_LAST_ACK:
@@ -380,8 +556,13 @@ static int tcp_process_data(tcp_socket_t* socket, const uint8_t* data,
     // Update the next expected sequence number
     socket->conn.rcv_nxt += data_len;
     
-    // TODO: Add data to the receive buffer
-    // For now, just notify the application directly
+    // Write data to the receive buffer
+    if (tcp_buffer_write(socket, data, data_len) != data_len) {
+        log_warning("NET", "Failed to write data to TCP receive buffer");
+        return -1;
+    }
+    
+    // Notify the application that data is ready
     if (socket->data_ready_callback) {
         socket->data_ready_callback(socket, data_len);
     }
@@ -427,7 +608,8 @@ static int tcp_process_fin(tcp_socket_t* socket, uint32_t seq_num) {
             // Send ACK for the FIN
             tcp_send_segment(socket, TCP_FLAG_ACK, NULL, 0);
             
-            // TODO: Start TIME_WAIT timer
+            // Start the TIME_WAIT timer
+            tcp_start_time_wait(socket);
             return 0;
             
         default:
@@ -712,6 +894,12 @@ tcp_socket_t* tcp_socket_create(const ipv4_address_t* local_addr, uint16_t local
     socket->conn.rcv_wnd = TCP_DEFAULT_WINDOW;
     socket->conn.mss = TCP_DEFAULT_MSS;
     
+    // Initialize receive buffer
+    if (tcp_buffer_init(socket, TCP_DEFAULT_BUFFER_SIZE) != 0) {
+        log_error("NET", "Failed to initialize TCP receive buffer");
+        return NULL;
+    }
+    
     return socket;
 }
 
@@ -904,6 +1092,12 @@ int tcp_socket_connect(tcp_socket_t* socket, const ipv4_address_t* addr, uint16_
     socket->conn.retransmit.rto = TCP_RETRANSMIT_TIMEOUT;
     socket->conn.retransmit.attempts = 0;
     
+    // Initialize receive buffer
+    if (tcp_buffer_init(socket, TCP_DEFAULT_BUFFER_SIZE) != 0) {
+        log_error("NET", "Failed to initialize TCP receive buffer");
+        return -1;
+    }
+    
     char addr_str[16];
     ipv4_to_str(addr, addr_str);
     log_info("NET", "Connecting to %s:%u", addr_str, port);
@@ -994,6 +1188,47 @@ int tcp_socket_send(tcp_socket_t* socket, const void* data, size_t len) {
 }
 
 /**
+ * Receive data from a TCP socket
+ */
+int tcp_socket_recv(tcp_socket_t* socket, void* buffer, size_t len) {
+    if (socket == NULL || buffer == NULL) {
+        log_error("NET", "Invalid parameters for tcp_socket_recv");
+        return -1;
+    }
+    
+    if (socket->state != TCP_STATE_ESTABLISHED && 
+        socket->state != TCP_STATE_FIN_WAIT_1 &&
+        socket->state != TCP_STATE_FIN_WAIT_2 &&
+        socket->state != TCP_STATE_CLOSE_WAIT) {
+        log_error("NET", "Cannot receive on TCP socket in state %s",
+                 tcp_state_to_str(socket->state));
+        return -1;
+    }
+    
+    // Try to read data from the receive buffer
+    int bytes_read = tcp_buffer_read(socket, buffer, len);
+    
+    // Update the receive window if needed
+    if (bytes_read > 0) {
+        // In a more sophisticated implementation, we would adjust the receive window
+        // based on buffer space and send a window update if necessary
+    }
+    
+    return bytes_read;
+}
+
+/**
+ * Check if there's data available to read from a TCP socket
+ */
+int tcp_socket_available(tcp_socket_t* socket) {
+    if (socket == NULL) {
+        return -1;
+    }
+    
+    return socket->rx_buffer.bytes_available;
+}
+
+/**
  * Get a string representation of a TCP state
  */
 const char* tcp_state_to_str(tcp_state_t state) {
@@ -1017,6 +1252,27 @@ const char* tcp_state_to_str(tcp_state_t state) {
  * Process TCP timers
  */
 void tcp_timer(uint32_t msec) {
+    uint32_t current_time = network_get_time_ms();
+
+    // Process TIME_WAIT timers
+    for (int i = 0; i < TCP_MAX_TIME_WAIT_SOCKETS; i++) {
+        if (time_wait_sockets[i].socket != NULL) {
+            // Check if TIME_WAIT period has expired
+            if (current_time - time_wait_sockets[i].start_time >= time_wait_sockets[i].duration) {
+                char addr_str[16];
+                ipv4_to_str(&time_wait_sockets[i].socket->remote_addr, addr_str);
+                log_info("NET", "TCP TIME_WAIT expired for connection to %s:%u",
+                      addr_str, time_wait_sockets[i].socket->remote_port);
+                
+                // Close the socket
+                time_wait_sockets[i].socket->state = TCP_STATE_CLOSED;
+                
+                // Free the slot
+                time_wait_sockets[i].socket = NULL;
+            }
+        }
+    }
+    
     // Iterate through all TCP sockets
     for (int i = 0; i < TCP_MAX_SOCKETS; i++) {
         tcp_socket_t* socket = &tcp_sockets[i];
@@ -1031,28 +1287,37 @@ void tcp_timer(uint32_t msec) {
             socket->state == TCP_STATE_SYN_RECEIVED ||
             socket->state == TCP_STATE_ESTABLISHED) {
             
-            // Dummy implementation just for the sample
-            // In a full implementation, we'd manage a retransmission queue
-            
-            // For now, just handle socket timeouts
-            if (socket->conn.retransmit.attempts > TCP_MAX_RETRANSMITS) {
-                log_warning("NET", "TCP connection timed out");
+            // Check if retransmission timer expired
+            if (socket->conn.retransmit.timer > 0) {
+                socket->conn.retransmit.timer -= msec;
                 
-                // Reset the connection
-                socket->state = TCP_STATE_CLOSED;
-                
-                // Notify the application
-                if (socket->closed_callback) {
-                    socket->closed_callback(socket);
+                if (socket->conn.retransmit.timer <= 0) {
+                    // Timer expired, retransmit
+                    socket->conn.retransmit.attempts++;
+                    socket->conn.retransmit.rto *= 2; // Exponential backoff
+                    
+                    if (socket->conn.retransmit.attempts > TCP_MAX_RETRANSMITS) {
+                        log_warning("NET", "TCP connection timed out after %d attempts",
+                                  socket->conn.retransmit.attempts);
+                        
+                        // Reset the connection
+                        socket->state = TCP_STATE_CLOSED;
+                        
+                        // Notify the application
+                        if (socket->closed_callback) {
+                            socket->closed_callback(socket);
+                        }
+                    } else {
+                        // Retransmit the last segment
+                        // In a full implementation, we would retransmit from a queue
+                        log_debug("NET", "TCP retransmitting (attempt %d/%d)",
+                                socket->conn.retransmit.attempts, TCP_MAX_RETRANSMITS);
+                        
+                        // Reset the timer for next attempt
+                        socket->conn.retransmit.timer = socket->conn.retransmit.rto;
+                    }
                 }
             }
-        }
-        
-        // Handle TIME_WAIT timeout
-        if (socket->state == TCP_STATE_TIME_WAIT) {
-            // In a real implementation, we'd track time and close after 2*MSL
-            // For this implementation, we'll just close immediately
-            socket->state = TCP_STATE_CLOSED;
         }
     }
 }

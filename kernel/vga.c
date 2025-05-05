@@ -859,10 +859,55 @@ int vga_get_current_terminal() {
 
 // Define a custom character (for fonts)
 void vga_define_custom_char(uint8_t char_code, const uint8_t* bitmap) {
-    // VGA text mode doesn't allow for custom characters directly
-    // This would require implementation using a CGA/EGA character generator
-    // This is a placeholder - in a real implementation, you'd need to use port I/O
-    // to program the character generator
+    // VGA text mode custom character implementation via Character Generator RAM
+    
+    // Disable interrupts while modifying hardware registers
+    __asm__ volatile("cli");
+    
+    // Tell the hardware we want to modify the character generator
+    // Character definitions live in the VGA's sequencer map 2
+    outb(0x3C4, 0x02);  // Select Sequencer Register - Map Mask Register
+    outb(0x3C5, 0x04);  // Select bitplane 2, which contains the font data
+    
+    outb(0x3C4, 0x04);  // Select Sequencer Register - Memory Mode Register
+    uint8_t seq4 = inb(0x3C5); // Read current value
+    outb(0x3C5, seq4 | 0x04);  // Set bit 2 to enable access to character RAM
+    
+    outb(0x3CE, 0x04);  // Graphics Controller Register - Read Map Select
+    outb(0x3CF, 0x02);  // Select map 2
+    
+    outb(0x3CE, 0x05);  // Graphics Controller Register - Mode Register
+    uint8_t gc5 = inb(0x3CF); // Read current value
+    outb(0x3CF, gc5 & ~0x10); // Clear bit 4 (set to read mode 0)
+    
+    outb(0x3CE, 0x06);  // Graphics Controller Register - Miscellaneous
+    uint8_t gc6 = inb(0x3CF); // Read current value
+    outb(0x3CF, gc6 & ~0x02); // Clear bit 1 (map character generator to CPU addressable memory)
+    
+    // Calculate address in character generator RAM
+    // Character generator RAM is mapped at A000:0000
+    uint8_t* font_ptr = (uint8_t*)0xA0000;
+    
+    // Each character is 16 bytes (8x16 character cell)
+    font_ptr += char_code * 16;
+    
+    // Write the 16 bytes of bitmap data to font memory
+    for (int i = 0; i < 16; i++) {
+        font_ptr[i] = bitmap[i];
+    }
+    
+    // Restore video mode settings
+    outb(0x3C4, 0x04);
+    outb(0x3C5, seq4); // Restore Sequencer Register 4
+    
+    outb(0x3CE, 0x05);
+    outb(0x3CF, gc5); // Restore Graphics Controller Register 5
+    
+    outb(0x3CE, 0x06);
+    outb(0x3CF, gc6); // Restore Graphics Controller Register 6
+    
+    // Re-enable interrupts
+    __asm__ volatile("sti");
 }
 
 // Fade the screen in
