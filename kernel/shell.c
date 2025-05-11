@@ -2251,7 +2251,7 @@ void cmd_vm(int argc, char *argv[]) {
     if (argc == 1) {
         // Display usage information if no arguments
         shell_println("Virtual Machine Management Commands:");
-        shell_println("  vm init        - Initialize virtualization subsystem");
+        shell_println("  vm init        - Initialize hardware virtualization subsystem");
         shell_println("  vm create <name> <memory_kb> <vcpus> - Create a new virtual machine");
         shell_println("  vm delete <id>  - Delete a virtual machine");
         shell_println("  vm start <id>   - Start a virtual machine");
@@ -2269,6 +2269,23 @@ void cmd_vm(int argc, char *argv[]) {
         shell_println("  vm start 1               - Start VM with ID 1");
         shell_println("  vm snapshot 1 snapshot.bin - Create snapshot of VM 1");
         return;
+    }
+    else if (strcmp(argv[1], "init") == 0) {
+        shell_println("Initializing hardware virtualization subsystem...");
+        
+        if (!vmx_is_supported()) {
+            shell_println("Error: CPU does not support hardware virtualization (Intel VT-x)");
+            shell_println("Make sure virtualization is enabled in BIOS/UEFI settings");
+            return;
+        }
+        
+        int result = vmx_init();
+        if (result != 0) {
+            shell_println("Error: Failed to initialize virtualization subsystem");
+            return;
+        }
+        
+        shell_println("Hardware virtualization subsystem initialized successfully");
     }
     else if (strcmp(argv[1], "create") == 0) {
         // Create a new VM

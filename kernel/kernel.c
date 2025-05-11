@@ -21,23 +21,63 @@
 
 // Define system version constants
 #define SYSTEM_VERSION "1.0.0"
-#define SYSTEM_BUILD_DATE "April 30, 2025"
+#define SYSTEM_BUILD_DATE "May 11, 2025"
 
 // Paging structures
 #define PAGE_SIZE 4096
 #define PAGE_TABLE_ENTRIES 1024
 #define PAGE_DIRECTORY_ENTRIES 1024
 
+// Boot information structure (aligned with bootloader's structure)
+typedef struct {
+    uint32_t mem_map_addr;      // Address of memory map
+    uint32_t mem_map_entries;   // Number of memory map entries
+    uint32_t kernel_phys;       // Physical address where kernel is loaded
+    uint32_t kernel_size;       // Size of kernel in bytes
+    uint8_t  boot_device;       // Boot device identifier
+    uint32_t vbe_mode_info;     // VBE mode info structure address
+    uint32_t acpi_rsdp;         // ACPI RSDP table address
+    uint32_t cmdline;           // Kernel command line address
+    uint32_t modules_count;     // Count of loaded modules
+    uint32_t modules_addr;      // Address of module info structures
+    uint32_t hardware_info;     // Address of hardware information structure
+} boot_info_t;
+
+// Hardware information structure
+typedef struct {
+    char     cpu_vendor[12];    // CPU vendor string
+    uint32_t cpu_features;      // CPU features flags
+    uint8_t  has_apic;          // 1 if APIC present
+    uint8_t  has_sse;           // 1 if SSE present
+    uint8_t  has_sse2;          // 1 if SSE2 present
+    uint8_t  has_sse3;          // 1 if SSE3 present
+    uint8_t  has_fpu;           // 1 if FPU present
+    uint8_t  has_vmx;           // 1 if VMX present (for virtualization)
+    uint8_t  has_aes;           // 1 if AES instructions present
+    uint8_t  has_xsave;         // 1 if XSAVE present
+    uint8_t  reserved[4];       // Reserved for future use
+} hardware_info_t;
+
+// Memory map entry structure
+typedef struct {
+    uint64_t base_addr;         // Base address of memory region
+    uint64_t length;            // Length of memory region in bytes
+    uint32_t type;              // Type of memory region
+    uint32_t acpi_extended;     // ACPI 3.0 extended attributes
+} memory_map_entry_t;
+
 // Global variables
 unsigned int page_directory[PAGE_DIRECTORY_ENTRIES] __attribute__((aligned(PAGE_SIZE)));
 unsigned int page_table[PAGE_TABLE_ENTRIES] __attribute__((aligned(PAGE_SIZE)));
 int hal_initialized = 0;
+boot_info_t *boot_info = NULL;  // Pointer to boot information
 
 // Forward declarations
 void gdb_stub(void);
 void vga_demo(void);
 void initialize_system(void);
 void display_welcome_message(void);
+void parse_boot_info(boot_info_t *info);
 
 struct tss initial_task_state = {
   .esp0 = 0x10000,
@@ -56,6 +96,93 @@ struct tss initial_task_state = {
   .fs_r = DATA_SELECTOR,
   .gs_r = DATA_SELECTOR,
 };
+
+// Detect a QEMU environment to apply special configurations
+int detect_qemu() {
+    // Check for QEMU-specific CPUID signature
+    uint32_t eax, ebx, ecx, edx;
+    asm volatile("cpuid" 
+               : "=a" (eax), "=b" (ebx), "=c" (ecx), "=d" (edx) 
+               : "a" (0x40000000));
+    
+    if (ebx == 0x4D455551 && ecx == 0x554D4551 && edx == 0x554D4551) { // "QEMU"
+        return 1;
+    }
+    
+    // Check for known QEMU I/O ports
+    // Try writing to and reading from a QEMU debug port
+    outb(0xe9, 'Q');  // QEMU debug port
+    
+    // Check for QEMU memory signature at known locations
+    char *qemu_signature = (char*)0xFFFD0000;
+    if (qemu_signature[0] == 'Q' && qemu_signature[1] == 'E' && 
+        qemu_signature[2] == 'M' && qemu_signature[3] == 'U') {
+        return 1;
+    }
+    
+    return 0;  // Not QEMU
+}
+
+/**
+ * Parse boot information passed by bootloader
+ */
+void parse_boot_info(boot_info_t *info) {
+    if (!info) {
+        log_warning("No boot info provided by bootloader");
+        return;
+    }
+    
+    log_info("Boot info: kernel at 0x%X, size %d bytes", 
+             info->kernel_phys, info->kernel_size);
+    
+    // Log boot device information
+    log_info("Booted from device 0x%02X", info->boot_device);
+    
+    // Process memory map if available
+    if (info->mem_map_addr && info->mem_map_entries) {
+        memory_map_entry_t *mmap = (memory_map_entry_t*)(info->mem_map_addr);
+        log_info("Memory map: %d entries at 0x%X", info->mem_map_entries, info->mem_map_addr);
+        
+        uint64_t total_memory = 0;
+        for (uint32_t i = 0; i < info->mem_map_entries; i++) {
+            if (mmap[i].type == 1) { // Available memory
+                log_debug("Memory region %d: 0x%llX - 0x%llX (%llu KB, type %d)", 
+                         i, mmap[i].base_addr, 
+                         mmap[i].base_addr + mmap[i].length - 1,
+                         mmap[i].length / 1024, mmap[i].type);
+                total_memory += mmap[i].length;
+            }
+        }
+        
+        log_info("Total usable memory: %llu KB (%llu MB)", 
+                total_memory / 1024, total_memory / (1024 * 1024));
+    }
+    
+    // Process hardware info if available
+    if (info->hardware_info) {
+        hardware_info_t *hw_info = (hardware_info_t*)(info->hardware_info);
+        
+        // Copy vendor string and ensure null termination
+        char vendor[13] = {0};
+        memcpy(vendor, hw_info->cpu_vendor, 12);
+        vendor[12] = '\0';
+        
+        log_info("CPU: %s", vendor);
+        log_info("CPU features: VMX=%d SSE=%d SSE2=%d SSE3=%d FPU=%d APIC=%d",
+                hw_info->has_vmx, hw_info->has_sse, hw_info->has_sse2,
+                hw_info->has_sse3, hw_info->has_fpu, hw_info->has_apic);
+    }
+    
+    // Process ACPI info if available
+    if (info->acpi_rsdp) {
+        log_info("ACPI RSDP found at 0x%X", info->acpi_rsdp);
+    }
+    
+    // Process VBE info if available
+    if (info->vbe_mode_info) {
+        log_info("VBE mode info available at 0x%X", info->vbe_mode_info);
+    }
+}
 
 /**
  * Initialize the paging system
@@ -371,13 +498,35 @@ void initialize_system() {
 
 /**
  * Main kernel entry point
+ * 
+ * This function supports both QEMU and real hardware booting.
+ * When booted from real hardware, the bootloader passes a pointer
+ * to the boot information structure in the EBX register.
  */
-void kernel_main() {
+void kernel_main(uint32_t magic, boot_info_t *info) {
+    // Store boot info for later use
+    boot_info = info;
+    
     // Initialize all system components
     initialize_system();
     
+    // Parse boot information if available
+    if (info) {
+        parse_boot_info(info);
+    }
+    
+    // Check if we're running under QEMU
+    int is_qemu = detect_qemu();
+    if (is_qemu) {
+        log_info("Running under QEMU emulation");
+    } else {
+        log_info("Running on real hardware");
+    }
+    
     // Show VGA demo screen on first boot
-    vga_demo();
+    if (is_qemu) {
+        vga_demo();
+    }
     
     // Display welcome message
     display_welcome_message();

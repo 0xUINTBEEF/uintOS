@@ -1,11 +1,12 @@
 ;*********************************************
 ; SecondaryLoader.asm
-; UEFI-compatible secondary bootloader for uintOS
+; Enhanced UEFI and BIOS compatible secondary bootloader for uintOS
 ;*********************************************
 bits 16
 
 ; Add support for loading from both BIOS and UEFI systems
 %define UEFI_SUPPORT 1
+%define REAL_HARDWARE_SUPPORT 1
 
 ; Improved memory mapping and detection
 %define MAX_MEM_REGIONS 32
@@ -19,6 +20,7 @@ bits 16
 %define ERR_A20_FAIL 0x03
 %define ERR_MEMORY_MAP 0x04
 %define ERR_PMODE_FAIL 0x05
+%define ERR_HARDWARE_DETECT 0x06
 
 ; Memory Structure Improvements
 struc boot_info
@@ -32,6 +34,22 @@ struc boot_info
     .cmdline:         resd 1   ; Kernel command line address
     .modules_count:   resd 1   ; Count of loaded modules
     .modules_addr:    resd 1   ; Address of module info structures
+    .hardware_info:   resd 1   ; Address of hardware information structure
+endstruc
+
+; Hardware information structure
+struc hardware_info_struct
+    .cpu_vendor:      resb 12  ; CPU vendor string
+    .cpu_features:    resd 1   ; CPU features flags
+    .has_apic:        resb 1   ; 1 if APIC present
+    .has_sse:         resb 1   ; 1 if SSE present
+    .has_sse2:        resb 1   ; 1 if SSE2 present
+    .has_sse3:        resb 1   ; 1 if SSE3 present
+    .has_fpu:         resb 1   ; 1 if FPU present
+    .has_vmx:         resb 1   ; 1 if VMX present (for virtualization)
+    .has_aes:         resb 1   ; 1 if AES instructions present
+    .has_xsave:       resb 1   ; 1 if XSAVE present
+    .reserved:        resb 4   ; Reserved for future use
 endstruc
 
 ; Create boot info structure that will be passed to kernel
@@ -47,6 +65,23 @@ boot_info_struct:
         at boot_info.cmdline,         dd 0
         at boot_info.modules_count,   dd 0
         at boot_info.modules_addr,    dd 0
+        at boot_info.hardware_info,   dd hardware_info
+    iend
+
+; Hardware information that will be passed to kernel
+hardware_info:
+    istruc hardware_info_struct
+        at hardware_info_struct.cpu_vendor,    times 12 db 0
+        at hardware_info_struct.cpu_features,  dd 0
+        at hardware_info_struct.has_apic,      db 0
+        at hardware_info_struct.has_sse,       db 0
+        at hardware_info_struct.has_sse2,      db 0
+        at hardware_info_struct.has_sse3,      db 0
+        at hardware_info_struct.has_fpu,       db 0
+        at hardware_info_struct.has_vmx,       db 0
+        at hardware_info_struct.has_aes,       db 0
+        at hardware_info_struct.has_xsave,     db 0
+        at hardware_info_struct.reserved,      times 4 db 0
     iend
 
 section .text
@@ -80,6 +115,23 @@ start:
     
 .a20_enabled:
     mov si, a20_success_msg
+    call print_string
+
+    ; Detect CPU and hardware features
+    mov si, hw_detect_msg
+    call print_string
+    
+    call detect_hardware
+    test ax, ax
+    jnz .hw_detected
+    
+    mov si, hw_detect_error_msg
+    call print_string
+    mov al, ERR_HARDWARE_DETECT
+    jmp fatal_error
+    
+.hw_detected:
+    mov si, hw_detect_success_msg
     call print_string
     
     ; Get memory map with failsafe mechanisms
@@ -160,6 +212,117 @@ protected_mode_entry:
 ;----------------------------------------------------------------------------
 [BITS 16]
 
+; Detect CPU and hardware features
+detect_hardware:
+    ; Check for CPUID instruction support
+    pushfd                          ; Save EFLAGS
+    pop eax                         ; Store EFLAGS in EAX
+    mov ecx, eax                    ; Save in ECX for later comparison
+    xor eax, 0x00200000             ; Flip ID bit in EFLAGS
+    push eax                        ; Store to stack
+    popfd                           ; Load into EFLAGS
+    pushfd                          ; Push EFLAGS to TOS
+    pop eax                         ; Store EFLAGS in EAX
+    push ecx                        ; Restore original EFLAGS
+    popfd                           ; from ECX
+    
+    ; Compare to see if we were able to change the ID bit
+    xor eax, ecx                    ; If we couldn't change ID bit, this will be 0
+    jz .no_cpuid                    ; Jump if CPUID not supported
+    
+    ; Get vendor ID string
+    mov eax, 0                      ; CPUID function 0: Get vendor ID
+    cpuid
+    
+    ; Store vendor string (EBX,EDX,ECX contain the vendor string)
+    mov [hardware_info + hardware_info_struct.cpu_vendor], ebx
+    mov [hardware_info + hardware_info_struct.cpu_vendor + 4], edx
+    mov [hardware_info + hardware_info_struct.cpu_vendor + 8], ecx
+    
+    ; Get feature information
+    mov eax, 1                      ; CPUID function 1: Get feature bits
+    cpuid
+    
+    ; Store CPU features
+    mov [hardware_info + hardware_info_struct.cpu_features], edx
+    
+    ; Check for SSE
+    bt edx, 25                      ; Bit 25 is SSE
+    jnc .no_sse
+    mov byte [hardware_info + hardware_info_struct.has_sse], 1
+.no_sse:
+
+    ; Check for SSE2
+    bt edx, 26                      ; Bit 26 is SSE2
+    jnc .no_sse2
+    mov byte [hardware_info + hardware_info_struct.has_sse2], 1
+.no_sse2:
+
+    ; Check for SSE3
+    bt ecx, 0                       ; Bit 0 of ECX is SSE3
+    jnc .no_sse3
+    mov byte [hardware_info + hardware_info_struct.has_sse3], 1
+.no_sse3:
+
+    ; Check for FPU
+    bt edx, 0                       ; Bit 0 is FPU
+    jnc .no_fpu
+    mov byte [hardware_info + hardware_info_struct.has_fpu], 1
+.no_fpu:
+
+    ; Check for VMX (virtualization)
+    bt ecx, 5                       ; Bit 5 of ECX is VMX
+    jnc .no_vmx
+    mov byte [hardware_info + hardware_info_struct.has_vmx], 1
+.no_vmx:
+
+    ; Check for APIC
+    bt edx, 9                       ; Bit 9 is APIC
+    jnc .no_apic
+    mov byte [hardware_info + hardware_info_struct.has_apic], 1
+.no_apic:
+
+    ; Check for XSAVE
+    bt ecx, 26                      ; Bit 26 of ECX is XSAVE
+    jnc .no_xsave
+    mov byte [hardware_info + hardware_info_struct.has_xsave], 1
+.no_xsave:
+
+    ; Check for AES
+    bt ecx, 25                      ; Bit 25 of ECX is AES
+    jnc .no_aes
+    mov byte [hardware_info + hardware_info_struct.has_aes], 1
+.no_aes:
+
+    mov ax, 1                       ; Success
+    ret
+
+.no_cpuid:
+    ; If we can't use CPUID, we can still check for FPU using a legacy method
+    ; Try to execute an FPU instruction and see if it generates an exception
+    
+    ; Clear EM and set MP in CR0
+    mov eax, cr0
+    and al, 0xFB                    ; Clear EM bit (bit 2)
+    or al, 0x02                     ; Set MP bit (bit 1)
+    mov cr0, eax
+    
+    ; Try FPU instruction (FNINIT)
+    xor ax, ax
+    push ax
+    fninit                          ; Reset FPU 
+    fnstsw [esp]                    ; Store status word
+    pop ax
+    
+    ; If status is 0, FPU is present
+    test ax, ax
+    jnz .no_fpu_legacy
+    mov byte [hardware_info + hardware_info_struct.has_fpu], 1
+.no_fpu_legacy:
+
+    mov ax, 1                       ; Success
+    ret
+
 ; Improved A20 line enabling with multiple methods and verification
 enable_a20_line:
     ; First try BIOS method
@@ -200,10 +363,15 @@ enable_a20_line:
     cmp ax, 1
     je .done
     
-    ; Try Fast A20 method
+    ; Try fast A20 method
     in al, 0x92
-    or al, 2
+    test al, 2
+    jnz .done       ; A20 already set
+    or al, 2        ; Set A20 bit
+    and al, 0xFE    ; Don't reset the system
     out 0x92, al
+    
+    ; Final check
     call check_a20
     
 .done:
@@ -221,7 +389,7 @@ enable_a20_line:
     jz .a20_kbd_wait_data
     ret
 
-; Check A20 line status
+; Check if A20 line is enabled
 check_a20:
     pushf
     push ds
@@ -229,45 +397,53 @@ check_a20:
     push di
     push si
     
-    cli                         ; Disable interrupts
+    cli
     
-    ; Set DS:SI = 0000:0500
-    xor ax, ax
-    mov ds, ax
-    mov si, 0x0500
+    xor ax, ax      ; Clear AX
+    mov es, ax      ; Set ES=0
     
-    ; Set ES:DI = FFFF:0510
-    mov ax, 0xFFFF
-    mov es, ax
-    mov di, 0x0510
+    not ax          ; Set AX=0xFFFF
+    mov ds, ax      ; Set DS=0xFFFF
     
-    ; Save original values at these addresses
-    mov dl, [ds:si]
-    mov dh, [es:di]
+    mov di, 0x0500  ; Address in segment ES (0:0500)
+    mov si, 0x0510  ; Address in segment DS (FFFF:0510)
     
-    ; Write different values to test
-    mov byte [ds:si], 0xAA
-    mov byte [es:di], 0x55
+    ; Save original bytes
+    mov al, [es:di]
+    push ax
+    mov al, [ds:si]
+    push ax
     
-    ; Check if addresses wrap around (A20 disabled) or are separate (A20 enabled)
-    cmp byte [ds:si], 0x55      ; If A20 is disabled, writing to FFFF:0510 affects 0000:0500
+    ; Write different values
+    mov byte [es:di], 0x00
+    mov byte [ds:si], 0xFF
     
-    ; Restore original values
-    mov [ds:si], dl
-    mov [es:di], dh
+    ; Add a small delay (can help on some hardware)
+    mov cx, 0x100
+.delay_loop:
+    nop
+    loop .delay_loop
     
-    ; Set return value (0 = disabled, 1 = enabled)
-    mov ax, 0                   ; Assume A20 is disabled
-    je .done                    ; If they're equal, A20 is disabled
-    mov ax, 1                   ; A20 is enabled
+    ; Check if values are different
+    mov al, [es:di]
+    cmp al, [ds:si]
     
-.done:
-    sti                         ; Restore interrupts
+    ; Restore original bytes
+    pop ax
+    mov [ds:si], al
+    pop ax
+    mov [es:di], al
+    
+    ; Set return value: AX=1 if A20 enabled, AX=0 if disabled
+    setne al        ; AL=1 if values were different (A20 enabled)
+    movzx ax, al    ; Zero-extend AL into AX
+    
     pop si
     pop di
     pop es
     pop ds
     popf
+    
     ret
 
 ; Enhanced memory detection with E820 and fallback methods
@@ -342,10 +518,12 @@ detect_memory:
     mov dword [di], 0x1000000   ; base low (16MB)
     mov dword [di+4], 0         ; base high
     mov dx, bx                  ; bx = 64KB blocks above 16MB
-    mov dword [di+8], edx       ; length in 64KB blocks
-    shl dword [di+8], 16        ; convert to bytes
+    mov ecx, edx                ; ecx = 64KB blocks
+    shl ecx, 16                 ; convert to bytes
+    mov dword [di+8], ecx       ; length low
     mov dword [di+12], 0        ; length high
     mov dword [di+16], 1        ; type (usable)
+    add di, 24
     
     mov ebx, memory_map_buffer
     mov ecx, 3                  ; 3 entries
@@ -466,12 +644,55 @@ find_acpi_rsdp:
 
 ; Load kernel from disk with improved error handling
 load_kernel:
+    ; Check if we're booting from hard disk
+    mov dl, [boot_info_struct + boot_info.boot_device]
+    cmp dl, 0x80
+    jae .use_lba
+    
+    ; Load from floppy using CHS addressing
+    ; Define disk packet for read sector operations
+    jmp .use_chs
+    
+.use_lba:
+    ; Use LBA addressing for hard disks (INT 13h extensions)
+    mov ah, 0x41                ; Check INT 13h extensions
+    mov bx, 0x55AA
+    int 0x13
+    jc .use_chs                 ; Fall back to CHS if not supported
+    
+    cmp bx, 0xAA55              ; Check signature
+    jne .use_chs
+    
+    ; Use extended read (LBA)
+    mov si, disk_packet         ; DS:SI points to disk packet
     mov ah, 0x42                ; Extended read
     mov dl, [boot_info_struct + boot_info.boot_device]
-    mov si, disk_packet
     int 0x13
-    jc .disk_error
+    jnc .load_success
+    jmp .disk_error
     
+.use_chs:
+    ; Read using CHS addressing
+    mov ah, 0x02                ; Read sectors function
+    mov al, 100                 ; Read 100 sectors (50KB)
+    mov ch, 0                   ; Cylinder 0
+    mov cl, 2                   ; Start from sector 2
+    mov dh, 0                   ; Head 0
+    mov dl, [boot_info_struct + boot_info.boot_device]
+    
+    ; Set buffer address
+    mov bx, 0x1000              ; Load to segment 0x1000
+    mov es, bx
+    xor bx, bx                  ; Offset 0
+    
+    int 0x13
+    jnc .load_success
+    
+.disk_error:
+    xor ax, ax                  ; Failure
+    ret
+    
+.load_success:
     ; Update kernel size in boot info
     mov eax, [sectors_to_read]
     shl eax, 9                  ; Multiply by 512 to get byte count
@@ -479,9 +700,10 @@ load_kernel:
     
     mov ax, 1                   ; Success
     ret
-    
-.disk_error:
-    xor ax, ax                  ; Failure
+
+; Setup protected mode environment
+setup_protected_mode:
+    ; Setup GDT, etc.
     ret
 
 ; Setup video mode for better graphics support
@@ -562,6 +784,20 @@ fatal_error:
     cli
     hlt
 
+; Print null-terminated string
+print_string:
+    push ax
+    mov ah, 0x0E  ; BIOS teletype function
+.loop:
+    lodsb         ; Load byte at DS:SI into AL and increment SI
+    test al, al
+    jz .done
+    int 0x10      ; Print character
+    jmp .loop
+.done:
+    pop ax
+    ret
+
 ; Data structures
 align 8
 gdt_start:
@@ -585,7 +821,7 @@ gdt_start:
     db 0            ; Base high
 
 gdt_descriptor:
-    dw gdt_descriptor - gdt_start - 1    ; GDT size
+    dw $ - gdt_start - 1    ; GDT size
     dd gdt_start                         ; GDT address
 
 CODE_SEG equ 0x08
@@ -663,6 +899,9 @@ memory_error_msg     db "Failed to get memory map!", 0x0D, 0x0A, 0
 loading_kernel_msg   db "Loading kernel...", 0x0D, 0x0A, 0
 kernel_error_msg     db "Failed to load kernel!", 0x0D, 0x0A, 0
 entering_pmode_msg   db "Entering protected mode...", 0x0D, 0x0A, 0
+hw_detect_msg        db "Detecting hardware...", 0x0D, 0x0A, 0
+hw_detect_success_msg db "Hardware detection complete", 0x0D, 0x0A, 0
+hw_detect_error_msg  db "Hardware detection failed!", 0x0D, 0x0A, 0
 
 ; Memory map buffer
 memory_map_buffer:   times MAX_MEM_REGIONS * 24 db 0
