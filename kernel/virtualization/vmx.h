@@ -323,6 +323,25 @@ typedef struct vm_instance {
     uint32_t apic_base;                 // Local APIC base address
 } vm_instance_t;
 
+// VM Snapshot flags
+#define VM_SNAPSHOT_INCLUDE_MEMORY    0x0001  // Include VM memory in snapshot
+#define VM_SNAPSHOT_INCLUDE_DEVICES   0x0002  // Include device state in snapshot
+#define VM_SNAPSHOT_COMPRESS          0x0004  // Compress snapshot data
+
+// VM Snapshot structure
+typedef struct vm_snapshot {
+    uint32_t magic;                  // Magic value to identify snapshot files
+    uint32_t version;                // Snapshot format version
+    uint32_t vm_id;                  // ID of the VM
+    uint32_t flags;                  // Snapshot flags
+    char name[32];                   // VM name
+    uint32_t memory_size;            // Size of memory in KB
+    uint32_t vcpu_count;             // Number of vCPUs
+    uint8_t vcpu_states[0];          // Variable-sized array of vCPU states
+    // Memory contents follow vCPU states when VM_SNAPSHOT_INCLUDE_MEMORY is set
+    // Device states follow memory contents when VM_SNAPSHOT_INCLUDE_DEVICES is set
+} vm_snapshot_t;
+
 /**
  * Initialize the virtualization subsystem
  * 
@@ -435,6 +454,25 @@ int vmx_list_vms(vm_instance_t* vms, uint32_t max_vms);
  * @return 0 on success, error code on failure
  */
 int vmx_setup_vmcs(uint32_t vm_id);
+
+/**
+ * Create a snapshot of a virtual machine's state
+ * 
+ * @param vm_id ID of the VM to snapshot
+ * @param snapshot_path Path to save the snapshot file
+ * @param flags Snapshot flags (VM_SNAPSHOT_*)
+ * @return 0 on success, error code on failure
+ */
+int vmx_create_snapshot(uint32_t vm_id, const char* snapshot_path, uint32_t flags);
+
+/**
+ * Restore a virtual machine from a snapshot
+ * 
+ * @param snapshot_path Path to the snapshot file
+ * @param new_vm_id Optional pointer to receive the ID of the restored VM
+ * @return 0 on success, error code on failure
+ */
+int vmx_restore_snapshot(const char* snapshot_path, uint32_t* new_vm_id);
 
 /**
  * VM exit handler function type

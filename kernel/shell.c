@@ -2261,38 +2261,14 @@ void cmd_vm(int argc, char *argv[]) {
         shell_println("  vm list         - List all virtual machines");
         shell_println("  vm info <id>    - Display detailed information about a VM");
         shell_println("  vm load <id> <image> - Load a kernel image into a VM");
+        shell_println("  vm snapshot <id> <file> [flags] - Create a VM snapshot");
+        shell_println("  vm restore <file> - Restore a VM from a snapshot");
         shell_println("");
         shell_println("Examples:");
         shell_println("  vm create myvm 65536 1    - Create a VM with 64MB RAM and 1 vCPU");
         shell_println("  vm start 1               - Start VM with ID 1");
+        shell_println("  vm snapshot 1 snapshot.bin - Create snapshot of VM 1");
         return;
-    }
-    
-    // Handle virtualization commands
-    if (strcmp(argv[1], "init") == 0) {
-        shell_println("Initializing virtualization subsystem...");
-        
-        // Check if VMX is supported
-        if (!vmx_is_supported()) {
-            shell_println("Error: CPU does not support virtualization extensions (VMX).");
-            return;
-        }
-        
-        // Initialize VMX
-        int result = vmx_init();
-        if (result != 0) {
-            shell_println("Error: Failed to initialize VMX subsystem.");
-            return;
-        }
-        
-        // Initialize VM memory subsystem
-        result = vm_memory_init();
-        if (result != 0) {
-            shell_println("Error: Failed to initialize VM memory subsystem.");
-            return;
-        }
-        
-        shell_println("Virtualization subsystem initialized successfully.");
     }
     else if (strcmp(argv[1], "create") == 0) {
         // Create a new VM
@@ -2746,6 +2722,82 @@ void cmd_vm(int argc, char *argv[]) {
         }
         
         shell_println("Kernel image loaded successfully.");
+    }
+    else if (strcmp(argv[1], "snapshot") == 0) {
+        // Create a snapshot of a VM
+        if (argc < 4) {
+            shell_println("Usage: vm snapshot <id> <file> [flags]");
+            shell_println("Flags: 1 = Include memory, 2 = Include devices, 4 = Compress");
+            return;
+        }
+        
+        // Parse VM ID
+        int vm_id = 0;
+        for (int i = 0; argv[2][i]; i++) {
+            if (argv[2][i] >= '0' && argv[2][i] <= '9') {
+                vm_id = vm_id * 10 + (argv[2][i] - '0');
+            } else {
+                shell_println("Error: Invalid VM ID.");
+                return;
+            }
+        }
+        
+        const char* snapshot_path = argv[3];
+        
+        // Default flags: include memory and devices
+        uint32_t flags = VM_SNAPSHOT_INCLUDE_MEMORY | VM_SNAPSHOT_INCLUDE_DEVICES;
+        
+        // Parse flags if provided
+        if (argc > 4) {
+            flags = 0;
+            for (int i = 0; argv[4][i]; i++) {
+                if (argv[4][i] >= '0' && argv[4][i] <= '9') {
+                    flags = flags * 10 + (argv[4][i] - '0');
+                } else {
+                    shell_println("Error: Invalid flags.");
+                    return;
+                }
+            }
+        }
+        
+        shell_print("Creating snapshot of VM ");
+        shell_print(argv[2]);
+        shell_print(" to '");
+        shell_print(snapshot_path);
+        shell_println("'...");
+        
+        int result = vmx_create_snapshot(vm_id, snapshot_path, flags);
+        if (result != 0) {
+            shell_println("Error: Failed to create VM snapshot.");
+            return;
+        }
+        
+        shell_println("VM snapshot created successfully.");
+    }
+    else if (strcmp(argv[1], "restore") == 0) {
+        // Restore a VM from a snapshot
+        if (argc < 3) {
+            shell_println("Usage: vm restore <snapshot_file>");
+            return;
+        }
+        
+        const char* snapshot_path = argv[2];
+        uint32_t new_vm_id = 0;
+        
+        shell_print("Restoring VM from snapshot '");
+        shell_print(snapshot_path);
+        shell_println("'...");
+        
+        int result = vmx_restore_snapshot(snapshot_path, &new_vm_id);
+        if (result != 0) {
+            shell_println("Error: Failed to restore VM from snapshot.");
+            return;
+        }
+        
+        shell_print("VM restored successfully with ID: ");
+        char id_str[16];
+        int_to_string(new_vm_id, id_str);
+        shell_println(id_str);
     }
     else {
         shell_println("Unknown VM command. Try 'vm' for help.");

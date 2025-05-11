@@ -1062,3 +1062,303 @@ int vmx_vmresume(struct vmm_guest_state *guest_state) {
     // We shouldn't reach here normally - VM exit should come back through the VM exit handler
     return 0;
 }
+
+// Magic value for identifying VM snapshots "uVMS"
+#define VM_SNAPSHOT_MAGIC 0x534D5675
+
+/**
+ * Create a snapshot of a virtual machine's state
+ * 
+ * @param vm_id ID of the VM to snapshot
+ * @param snapshot_path Path to save the snapshot file
+ * @param flags Snapshot flags (VM_SNAPSHOT_*)
+ * @return 0 on success, error code on failure
+ */
+int vmx_create_snapshot(uint32_t vm_id, const char* snapshot_path, uint32_t flags) {
+    // Find the VM
+    vm_instance_t* vm = find_vm_by_id(vm_id);
+    if (!vm) {
+        log_error(VMX_LOG_TAG, "VM with ID %d not found", vm_id);
+        return VMX_ERROR_VM_NOT_FOUND;
+    }
+    
+    // Check that the VM is in a valid state for snapshotting (not uninitialized)
+    if (vm->state == VM_STATE_UNINITIALIZED) {
+        log_error(VMX_LOG_TAG, "Cannot snapshot uninitialized VM %d", vm_id);
+        return VMX_ERROR_VM_INVALID_STATE;
+    }
+    
+    log_info(VMX_LOG_TAG, "Creating snapshot of VM '%s' (ID: %d) to '%s'", 
+             vm->name, vm_id, snapshot_path);
+    
+    // Open file for writing
+    void* file = vfs_open(snapshot_path, VFS_O_WRONLY | VFS_O_CREAT | VFS_O_TRUNC);
+    if (!file) {
+        log_error(VMX_LOG_TAG, "Failed to open snapshot file '%s' for writing", snapshot_path);
+        return -1;
+    }
+    
+    // If VM is running, we need to pause it first
+    int was_running = 0;
+    if (vm->state == VM_STATE_RUNNING) {
+        log_debug(VMX_LOG_TAG, "Pausing VM for snapshot");
+        vmx_pause_vm(vm_id);
+        was_running = 1;
+    }
+    
+    // Calculate snapshot header size
+    size_t header_size = sizeof(vm_snapshot_t);
+    size_t vcpu_state_size = vm->vcpu_count * sizeof(hal_cpu_context_t);
+    
+    // Initialize snapshot header
+    vm_snapshot_t snapshot_header = {
+        .magic = VM_SNAPSHOT_MAGIC,
+        .version = 1,
+        .vm_id = vm->id,
+        .flags = flags,
+        .memory_size = vm->allocated_memory,
+        .vcpu_count = vm->vcpu_count
+    };
+    
+    // Copy VM name
+    strncpy(snapshot_header.name, vm->name, sizeof(snapshot_header.name) - 1);
+    snapshot_header.name[sizeof(snapshot_header.name) - 1] = '\0';
+    
+    // Write snapshot header
+    if (vfs_write(file, &snapshot_header, sizeof(snapshot_header)) != sizeof(snapshot_header)) {
+        log_error(VMX_LOG_TAG, "Failed to write snapshot header");
+        vfs_close(file);
+        if (was_running) vmx_resume_vm(vm_id);
+        return -1;
+    }
+    
+    // Write vCPU states
+    for (uint32_t i = 0; i < vm->vcpu_count; i++) {
+        if (vfs_write(file, vm->vcpu_contexts[i], sizeof(hal_cpu_context_t)) != 
+                sizeof(hal_cpu_context_t)) {
+            log_error(VMX_LOG_TAG, "Failed to write vCPU state %d", i);
+            vfs_close(file);
+            if (was_running) vmx_resume_vm(vm_id);
+            return -1;
+        }
+    }
+    
+    // If requested, save VM memory contents
+    if (flags & VM_SNAPSHOT_INCLUDE_MEMORY) {
+        log_debug(VMX_LOG_TAG, "Saving %d KB of VM memory", vm->allocated_memory);
+        
+        // Get VM memory (this is a simplified approach - in a real implementation 
+        // we would need to walk the guest page tables)
+        void* vm_memory = vm_memory_get_physical_mapping(vm_id);
+        if (!vm_memory) {
+            log_error(VMX_LOG_TAG, "Failed to get VM memory mapping");
+            vfs_close(file);
+            if (was_running) vmx_resume_vm(vm_id);
+            return -1;
+        }
+        
+        // Write the memory contents
+        size_t memory_size = vm->allocated_memory * 1024; // Convert KB to bytes
+        if (vfs_write(file, vm_memory, memory_size) != memory_size) {
+            log_error(VMX_LOG_TAG, "Failed to write VM memory contents");
+            vfs_close(file);
+            if (was_running) vmx_resume_vm(vm_id);
+            return -1;
+        }
+    }
+    
+    // If requested, save device states (simplified approach)
+    if (flags & VM_SNAPSHOT_INCLUDE_DEVICES) {
+        log_debug(VMX_LOG_TAG, "Saving device states");
+        
+        // In a real implementation, we would iterate through all 
+        // device emulations and save their state
+        
+        // For now, just write the I/O bitmap as an example
+        if (vfs_write(file, vm->io_bitmap_a, 4096) != 4096) {
+            log_error(VMX_LOG_TAG, "Failed to write I/O bitmap A");
+            vfs_close(file);
+            if (was_running) vmx_resume_vm(vm_id);
+            return -1;
+        }
+        
+        if (vfs_write(file, vm->io_bitmap_b, 4096) != 4096) {
+            log_error(VMX_LOG_TAG, "Failed to write I/O bitmap B");
+            vfs_close(file);
+            if (was_running) vmx_resume_vm(vm_id);
+            return -1;
+        }
+    }
+    
+    // Close the snapshot file
+    vfs_close(file);
+    
+    // Resume VM if it was running before
+    if (was_running) {
+        log_debug(VMX_LOG_TAG, "Resuming VM after snapshot");
+        vmx_resume_vm(vm_id);
+    }
+    
+    log_info(VMX_LOG_TAG, "Snapshot of VM '%s' (ID: %d) created successfully", 
+             vm->name, vm_id);
+    
+    return VMX_SUCCESS;
+}
+
+/**
+ * Restore a virtual machine from a snapshot
+ * 
+ * @param snapshot_path Path to the snapshot file
+ * @param new_vm_id Optional pointer to receive the ID of the restored VM
+ * @return 0 on success, error code on failure
+ */
+int vmx_restore_snapshot(const char* snapshot_path, uint32_t* new_vm_id) {
+    log_info(VMX_LOG_TAG, "Restoring VM from snapshot '%s'", snapshot_path);
+    
+    // Open snapshot file for reading
+    void* file = vfs_open(snapshot_path, VFS_O_RDONLY);
+    if (!file) {
+        log_error(VMX_LOG_TAG, "Failed to open snapshot file '%s' for reading", snapshot_path);
+        return -1;
+    }
+    
+    // Read snapshot header
+    vm_snapshot_t snapshot_header;
+    if (vfs_read(file, &snapshot_header, sizeof(snapshot_header)) != sizeof(snapshot_header)) {
+        log_error(VMX_LOG_TAG, "Failed to read snapshot header");
+        vfs_close(file);
+        return -1;
+    }
+    
+    // Verify magic value
+    if (snapshot_header.magic != VM_SNAPSHOT_MAGIC) {
+        log_error(VMX_LOG_TAG, "Invalid snapshot file (bad magic value)");
+        vfs_close(file);
+        return -1;
+    }
+    
+    // Check snapshot version compatibility
+    if (snapshot_header.version > 1) {
+        log_error(VMX_LOG_TAG, "Unsupported snapshot version: %d", snapshot_header.version);
+        vfs_close(file);
+        return -1;
+    }
+    
+    log_info(VMX_LOG_TAG, "Restoring VM '%s' with %d KB memory and %d vCPUs", 
+             snapshot_header.name, snapshot_header.memory_size, snapshot_header.vcpu_count);
+    
+    // Create a new VM
+    int vm_id = vmx_create_vm(snapshot_header.name, snapshot_header.memory_size, 
+                             snapshot_header.vcpu_count);
+    if (vm_id < 0) {
+        log_error(VMX_LOG_TAG, "Failed to create VM for restoration");
+        vfs_close(file);
+        return -1;
+    }
+    
+    vm_instance_t* vm = find_vm_by_id(vm_id);
+    if (!vm) {
+        log_error(VMX_LOG_TAG, "Internal error: VM %d not found after creation", vm_id);
+        vfs_close(file);
+        return -1;
+    }
+    
+    // Read vCPU states
+    for (uint32_t i = 0; i < snapshot_header.vcpu_count && i < MAX_VCPUS; i++) {
+        if (vfs_read(file, vm->vcpu_contexts[i], sizeof(hal_cpu_context_t)) != 
+                sizeof(hal_cpu_context_t)) {
+            log_error(VMX_LOG_TAG, "Failed to read vCPU state %d", i);
+            vfs_close(file);
+            vmx_delete_vm(vm_id);
+            return -1;
+        }
+    }
+    
+    // If snapshot includes memory contents, restore them
+    if (snapshot_header.flags & VM_SNAPSHOT_INCLUDE_MEMORY) {
+        log_debug(VMX_LOG_TAG, "Restoring %d KB of VM memory", snapshot_header.memory_size);
+        
+        // Get VM memory
+        void* vm_memory = vm_memory_get_physical_mapping(vm_id);
+        if (!vm_memory) {
+            log_error(VMX_LOG_TAG, "Failed to get VM memory mapping");
+            vfs_close(file);
+            vmx_delete_vm(vm_id);
+            return -1;
+        }
+        
+        // Read the memory contents
+        size_t memory_size = snapshot_header.memory_size * 1024; // Convert KB to bytes
+        if (vfs_read(file, vm_memory, memory_size) != memory_size) {
+            log_error(VMX_LOG_TAG, "Failed to read VM memory contents");
+            vfs_close(file);
+            vmx_delete_vm(vm_id);
+            return -1;
+        }
+    }
+    
+    // If snapshot includes device states, restore them
+    if (snapshot_header.flags & VM_SNAPSHOT_INCLUDE_DEVICES) {
+        log_debug(VMX_LOG_TAG, "Restoring device states");
+        
+        // Read I/O bitmaps
+        if (vfs_read(file, vm->io_bitmap_a, 4096) != 4096) {
+            log_error(VMX_LOG_TAG, "Failed to read I/O bitmap A");
+            vfs_close(file);
+            vmx_delete_vm(vm_id);
+            return -1;
+        }
+        
+        if (vfs_read(file, vm->io_bitmap_b, 4096) != 4096) {
+            log_error(VMX_LOG_TAG, "Failed to read I/O bitmap B");
+            vfs_close(file);
+            vmx_delete_vm(vm_id);
+            return -1;
+        }
+    }
+    
+    // Close the snapshot file
+    vfs_close(file);
+    
+    // Setup VMCS for the new VM
+    int vmcs_result = vmx_setup_vmcs(vm_id);
+    if (vmcs_result != VMX_SUCCESS) {
+        log_error(VMX_LOG_TAG, "Failed to setup VMCS for restored VM");
+        vmx_delete_vm(vm_id);
+        return vmcs_result;
+    }
+    
+    log_info(VMX_LOG_TAG, "VM '%s' (ID: %d) restored successfully from snapshot",
+             vm->name, vm_id);
+    
+    // Return the VM ID if requested
+    if (new_vm_id) {
+        *new_vm_id = vm_id;
+    }
+    
+    return VMX_SUCCESS;
+}
+
+// Helper function to get a physical mapping of VM memory
+// This is a simplified approach - in a real implementation we would need
+// to walk the guest page tables or maintain a proper mapping
+static void* vm_memory_get_physical_mapping(uint32_t vm_id) {
+    vm_instance_t* vm = find_vm_by_id(vm_id);
+    if (!vm) {
+        return NULL;
+    }
+    
+    // In a real implementation, we would need to get a proper mapping
+    // of the physical memory allocated to the VM. This is just a placeholder.
+    static void* dummy_memory = NULL;
+    
+    // For demo purposes, allocate some memory if not already allocated
+    if (!dummy_memory) {
+        dummy_memory = malloc(16 * 1024 * 1024); // 16 MB buffer
+        if (dummy_memory) {
+            memset(dummy_memory, 0, 16 * 1024 * 1024);
+        }
+    }
+    
+    return dummy_memory;
+}
