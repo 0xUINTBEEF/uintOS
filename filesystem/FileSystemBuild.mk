@@ -7,8 +7,12 @@ EXT2_OBJECTS := $(patsubst %.c, $(BUILD_DIR)/filesystem/ext2/%.o, $(wildcard ext
 # Add iso9660 filesystem objects
 ISO9660_OBJECTS := $(patsubst %.c, $(BUILD_DIR)/filesystem/iso9660/%.o, $(wildcard iso9660/*.c))
 
+# Add exFAT filesystem objects
+EXFAT_OBJECTS := $(patsubst %.c, $(BUILD_DIR)/filesystem/exfat/%.o, $(wildcard exfat/*.c))
+
 # Source files
-FILESYSTEM_SOURCES := fat12.c vfs/vfs.c fat12_vfs_adapter.c ext2/ext2.c iso9660/iso9660.c
+FILESYSTEM_SOURCES := fat12.c vfs/vfs.c fat12_vfs_adapter.c ext2/ext2.c iso9660/iso9660.c \
+                     exfat/exfat.c exfat/exfat_vfs_adapter.c
 
 # Object files
 FILESYSTEM_OBJECTS := $(FILESYSTEM_SOURCES:.c=.o)
@@ -34,14 +38,18 @@ $(BUILD_DIR)/filesystem/iso9660/%.o: iso9660/%.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -c $< -o $@
 
+$(BUILD_DIR)/filesystem/exfat/%.o: exfat/%.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -c $< -o $@
+
 FILESYSTEM_LIB := $(BUILD_DIR)/filesystem/libfilesystem.a
 
-$(FILESYSTEM_LIB): $(FILESYSTEM_OBJECTS) $(EXT2_OBJECTS) $(ISO9660_OBJECTS)
+$(FILESYSTEM_LIB): $(FILESYSTEM_OBJECTS) $(EXT2_OBJECTS) $(ISO9660_OBJECTS) $(EXFAT_OBJECTS)
 	$(AR) rcs $@ $^
 
 .PHONY: clean
 clean:
-	rm -f $(FILESYSTEM_OBJECTS) $(EXT2_OBJECTS) $(ISO9660_OBJECTS) $(FILESYSTEM_LIB)
+	rm -f $(FILESYSTEM_OBJECTS) $(EXT2_OBJECTS) $(ISO9660_OBJECTS) $(EXFAT_OBJECTS) $(FILESYSTEM_LIB)
 
 clean-filesystem:
 	rm -f $(FILESYSTEM_OBJECTS)

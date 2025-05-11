@@ -469,18 +469,21 @@ void initialize_system() {
     register_fat12_with_vfs(); // Register FAT12
     register_ext2_with_vfs();  // Register ext2
     register_iso9660_with_vfs(); // Register ISO9660
+    register_exfat_with_vfs(); // Register exFAT
     
     // Initialize individual filesystems
     log_info("KERNEL", "Initializing filesystem drivers...");
     fat12_init();
     ext2_init("ext2_disk");
     iso9660_init("cdrom");
+    exfat_init("exfat_disk");
     
     // Mount filesystems
     log_info("KERNEL", "Mounting filesystems...");
     vfs_mount("fat12", "fat12_disk", "/fat", 0);
     vfs_mount("ext2", "ext2_disk", "/ext2", 0);
-    vfs_mount("iso9660", "cdrom", "/cdrom", 0);
+    vfs_mount("iso9660", "cdrom", "/cdrom", VFS_MOUNT_READONLY);
+    vfs_mount("exfat", "exfat_disk", "/exfat", 0);
     
     log_info("KERNEL", "All filesystems registered and mounted");
     
