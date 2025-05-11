@@ -126,6 +126,23 @@ typedef struct {
 } security_audit_t;
 
 /**
+ * Task security context structure
+ */
+typedef struct {
+    uint32_t capabilities;     // Task capabilities
+    uint32_t effective_uid;    // Effective user ID
+    uint32_t real_uid;         // Real user ID
+    uint32_t saved_uid;        // Saved user ID
+    uint32_t effective_gid;    // Effective group ID
+    uint32_t real_gid;         // Real group ID
+    uint32_t saved_gid;        // Saved group ID
+    uint32_t supplementary_gids[16]; // Supplementary group IDs
+    uint32_t n_supplementary;  // Number of supplementary groups
+    bool no_new_privs;         // Prevent privilege escalation
+    uint32_t seccomp_mode;     // Secure computing mode
+} security_context_t;
+
+/**
  * Initialize the security subsystem
  *
  * @return 0 on success, negative error code on failure
@@ -319,5 +336,68 @@ bool security_current_has_capability(uint32_t capability);
  * @return true if access is granted, false otherwise
  */
 bool security_current_can_access(const char* object_name, uint16_t desired_access);
+
+/**
+ * System call permission checking
+ *
+ * @param task Task structure
+ * @param syscall_num System call number
+ * @return true if permission is granted, false otherwise
+ */
+bool security_check_syscall_permission(struct task* task, uint64_t syscall_num);
+
+/**
+ * Create a default security context for a new task
+ *
+ * @return Pointer to the created security context
+ */
+security_context_t* security_create_context(void);
+
+/**
+ * Free a security context
+ *
+ * @param context Security context to free
+ */
+void security_free_context(security_context_t* context);
+
+/**
+ * Check if a task has a specific capability
+ *
+ * @param task Task structure
+ * @param capability Capability to check
+ * @return true if task has capability, false otherwise
+ */
+bool security_has_capability(struct task* task, uint32_t capability);
+
+/**
+ * Check file access permissions
+ *
+ * @param task Task structure
+ * @param path File path
+ * @param mode Access mode
+ * @return true if access is granted, false otherwise
+ */
+bool security_check_file_access(struct task* task, const char* path, int mode);
+
+/**
+ * Check if the task can access a specific memory address
+ *
+ * @param task Task structure
+ * @param addr Memory address
+ * @param size Size of the memory region
+ * @param write Whether the access is for writing
+ * @return true if access is granted, false otherwise
+ */
+bool security_check_memory_access(struct task* task, void* addr, size_t size, bool write);
+
+/**
+ * Check if a task is allowed to send a signal to another task
+ *
+ * @param sender Task sending the signal
+ * @param recipient Task receiving the signal
+ * @param signal Signal number
+ * @return true if permission is granted, false otherwise
+ */
+bool security_check_signal_permission(struct task* sender, struct task* recipient, int signal);
 
 #endif /* SECURITY_H */

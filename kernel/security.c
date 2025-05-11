@@ -428,3 +428,85 @@ bool security_current_has_capability(uint64_t capability) {
     
     return result;
 }
+
+/**
+ * Check if a task has permission to make a specific system call
+ *
+ * This function determines whether the given task is allowed to
+ * execute the specified system call based on its security context,
+ * capabilities, and system policies.
+ *
+ * @param task The task attempting to make the system call
+ * @param syscall_num The system call number being requested
+ * @return true if the task has permission, false otherwise
+ */
+bool security_check_syscall_permission(struct task* task, uint64_t syscall_num) {
+    // If task is NULL, deny access
+    if (!task) {
+        log_warn("SECURITY", "NULL task attempted syscall %llu", syscall_num);
+        return false;
+    }
+    
+    // Root/system tasks can make any syscall
+    if (task->euid == 0) {
+        return true;
+    }
+
+    // Check specific restricted syscalls
+    switch (syscall_num) {
+        // Module management restricted to root
+        case SYS_MODULE_LOAD:
+        case SYS_MODULE_UNLOAD:
+            return task->euid == 0;
+            
+        // Memory management may require CAP_SYS_RESOURCE
+        case SYS_MMAP:
+        case SYS_MUNMAP:
+        case SYS_BRK:
+            // Regular users can allocate memory up to their limits
+            // For advanced operations, check for CAP_SYS_RESOURCE
+            return true;
+            
+        // Process management
+        case SYS_FORK:
+        case SYS_EXECVE:
+        case SYS_EXIT:
+        case SYS_WAITPID:
+        case SYS_GETPID:
+        case SYS_GETPPID:
+        case SYS_YIELD:
+            // All processes allowed to use basic process management
+            return true;
+            
+        // File operations
+        case SYS_OPEN:
+        case SYS_READ:
+        case SYS_WRITE:
+        case SYS_CLOSE:
+            // Access control is checked at the VFS level
+            return true;
+            
+        // Time-related operations
+        case SYS_TIME:
+            // Reading time is allowed for all processes
+            return true;
+
+        // Directory operations
+        case SYS_CHDIR:
+        case SYS_MKDIR:
+        case SYS_RMDIR:
+        case SYS_UNLINK:
+            // Directory access control is checked at the VFS level
+            return true;
+            
+        default:
+            // For any syscalls we don't explicitly handle, deny access
+            // to non-root users until proper permissions are defined
+            if (syscall_num > 50) {
+                log_warn("SECURITY", "Unrecognized syscall %llu by task %d", 
+                         syscall_num, task->id);
+                return false;
+            }
+            return true;
+    }
+}

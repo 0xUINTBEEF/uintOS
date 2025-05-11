@@ -10,6 +10,8 @@
 #include "shell.h"
 #include "vga.h"
 #include "panic.h"  // Include the panic header
+#include "module.h" // Include the module system header
+#include "syscall.h" // Include the syscall header
 #include "../filesystem/fat12.h"
 #include "../memory/paging.h"
 #include "../memory/heap.h"
@@ -399,6 +401,29 @@ void initialize_system() {
     
     log_info("KERNEL", "Initializing interrupt system...");
     uintos_initialize_interrupts();
+    
+    // Initialize system call interface
+    log_info("KERNEL", "Initializing system call interface...");
+    syscall_init();
+    log_info("KERNEL", "System call interface initialized");
+    
+    // Initialize device management system
+    log_info("KERNEL", "Initializing device manager...");
+    int device_manager_result = device_manager_init();
+    if (device_manager_result != 0) {
+        log_error("KERNEL", "Device manager initialization failed: %d", device_manager_result);
+    } else {
+        log_info("KERNEL", "Device manager initialized successfully");
+    }
+
+    // Initialize module management system
+    log_info("KERNEL", "Initializing module system...");
+    int module_system_result = module_system_init();
+    if (module_system_result != 0) {
+        log_error("KERNEL", "Module system initialization failed: %d", module_system_result);
+    } else {
+        log_info("KERNEL", "Module system initialized successfully");
+    }
     
     // Configure and calibrate the system timer for preemptive scheduling
     log_info("KERNEL", "Configuring system timer for preemptive scheduling...");
