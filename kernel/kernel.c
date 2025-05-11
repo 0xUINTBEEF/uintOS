@@ -18,6 +18,9 @@
 #include "../kernel/logging/log.h"
 #include "../kernel/virtualization/vmx.h"
 #include "../kernel/virtualization/vm_memory.h"
+#include "../drivers/pci/pci.h" // Include PCI driver framework
+#include "../drivers/network/rtl8139.h" // Include RTL8139 network driver
+#include "../drivers/audio/ac97.h" // Include AC97 audio driver
 
 // Define system version constants
 #define SYSTEM_VERSION "1.0.0"
@@ -486,6 +489,33 @@ void initialize_system() {
     vfs_mount("exfat", "exfat_disk", "/exfat", 0);
     
     log_info("KERNEL", "All filesystems registered and mounted");
+    
+    // Initialize PCI subsystem
+    log_info("KERNEL", "Initializing PCI subsystem...");
+    int pci_result = pci_init();
+    if (pci_result != 0) {
+        log_error("KERNEL", "PCI subsystem initialization failed: %d", pci_result);
+    } else {
+        log_info("KERNEL", "PCI subsystem initialized successfully");
+        
+        // Initialize RTL8139 network driver
+        log_info("KERNEL", "Initializing RTL8139 network driver...");
+        int rtl8139_result = rtl8139_init();
+        if (rtl8139_result != 0) {
+            log_error("KERNEL", "RTL8139 network driver initialization failed: %d", rtl8139_result);
+        } else {
+            log_info("KERNEL", "RTL8139 network driver initialized successfully");
+        }
+        
+        // Initialize AC97 audio driver
+        log_info("KERNEL", "Initializing AC97 audio driver...");
+        int ac97_result = ac97_init();
+        if (ac97_result != 0) {
+            log_error("KERNEL", "AC97 audio driver initialization failed: %d", ac97_result);
+        } else {
+            log_info("KERNEL", "AC97 audio driver initialized successfully");
+        }
+    }
     
     // Create system tasks with the new named task API
     log_info("KERNEL", "Creating system tasks...");

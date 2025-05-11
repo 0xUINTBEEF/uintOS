@@ -10,6 +10,13 @@ uintOS is an educational operating system demonstrating OS concepts, kernel deve
 - **Graphics**: VGA text mode with basic windowing and GUI framework
 - **Security**: Capability-based access control and resource isolation
 - **Power Management**: ACPI-compatible power states and thermal monitoring
+- **Drivers**: Comprehensive driver support for various device types including:
+  - Display: Intel GPU with 2D acceleration
+  - Input: PS/2 mouse interface
+  - Storage: NVMe high-speed SSD support
+  - Network: RTL8139 Ethernet and RTL8821CE WiFi chipsets
+  - USB: Mass storage devices
+  - Audio: AC97 audio chipset
 
 ## Directory Structure
 ```
@@ -20,6 +27,14 @@ memory/     - Memory management
 filesystem/ - VFS and filesystem drivers
 network/    - Network protocol stack
 drivers/    - Device drivers
+  ├── audio/    - Audio device drivers
+  ├── display/  - Display and GPU drivers
+  ├── input/    - Keyboard, mouse, and input devices
+  ├── network/  - Ethernet and wireless drivers
+  ├── pci/      - PCI bus interface
+  ├── storage/  - Disk and storage controllers
+  ├── usb/      - USB controllers and devices
+  └── windows/  - Windows driver compatibility
 ```
 
 ## Key Commands
@@ -28,6 +43,7 @@ drivers/    - Device drivers
 - `meminfo`, `taskinfo` - System information
 - `gui start/shutdown` - GUI subsystem control
 - `power [state]` - Power management
+- `driver list/load/unload` - Driver management commands
 
 ## Building & Running
 1. Install x86 cross-compiler
