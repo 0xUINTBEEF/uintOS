@@ -30,5 +30,7 @@ void cmd_log(int argc, char *argv[]); // New log command
 void cmd_usb(int argc, char *argv[]); // New USB devices command
 void cmd_taskman(int argc, char *argv[]); // New taskman command
 void cmd_panic(int argc, char *argv[]); // Kernel panic test command
+void cmd_preempt(int argc, char *argv[]); // Control preemptive multitasking
+void cmd_taskdemo(int argc, char *argv[]); // Run multitasking demo
 
 #endif // SHELL_H

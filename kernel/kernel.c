@@ -12,6 +12,7 @@
 #include "panic.h"  // Include the panic header
 #include "module.h" // Include the module system header
 #include "syscall.h" // Include the syscall header
+#include "preempt.h" // Include preemptive scheduling header
 #include "../filesystem/fat12.h"
 #include "../memory/paging.h"
 #include "../memory/heap.h"
@@ -329,9 +330,14 @@ void display_welcome_message() {
     vga_write_string("-------------------------------------------\n");
     vga_set_color(vga_entry_color(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK));
     vga_write_string("Memory, filesystem, task and VGA subsystems initialized\n");
+    vga_write_string("Preemptive multitasking enabled\n");
     vga_write_string("Type 'help' for a list of available commands\n\n");
     
     log_info("System initialization completed successfully");
+    
+    // Enable preemptive multitasking now that initialization is complete
+    enable_preemption();
+    log_info("Preemptive multitasking enabled");
 }
 
 /**
@@ -468,10 +474,20 @@ void initialize_system() {
         
         log_info("KERNEL", "PIT timer configured for preemptive scheduling (100Hz)");
     }
-    
-    // Initialize task management
+      // Initialize task management
     log_info("KERNEL", "Initializing multitasking...");
     initialize_multitasking();
+      // Initialize preemptive multitasking
+    log_info("KERNEL", "Initializing preemptive multitasking...");
+    if (init_preemptive_multitasking(100) == 0) { // 100 Hz timer frequency
+        log_info("KERNEL", "Preemptive multitasking initialized successfully");
+        
+        // Enable preemption by default
+        enable_preemption();
+        log_info("KERNEL", "Preemptive multitasking enabled by default");
+    } else {
+        log_error("KERNEL", "Failed to initialize preemptive multitasking");
+    }
     
     // Initialize threading system
     log_info("KERNEL", "Initializing threading system...");

@@ -5,7 +5,7 @@ COMPILER_FLAGS=-Wall -Wno-format
 COMPILER_FLAGS+=-fno-stack-protector -fno-omit-frame-pointer -fno-asynchronous-unwind-tables
 COMPILER_FLAGS+=-fno-builtin -masm=intel -m32 -nostdlib -gdwarf-2 -ggdb3 -save-temps
 
-SOURCE_FILES := gdt.c io.c irq.c task.c lapic.c task1.c keyboard.c shell.c vga.c task2.c kernel.c
+SOURCE_FILES := gdt.c io.c irq.c task.c lapic.c task1.c keyboard.c shell.c vga.c task2.c kernel.c preempt.c task_demo.c task_yield.c
 # Add logging files to sources
 LOGGING_FILES := logging/log.c
 SOURCE_FILES += $(LOGGING_FILES)

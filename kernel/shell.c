@@ -464,9 +464,11 @@ void shell_execute_command(const char *command) {
         } else if (strcmp(argv[0], "vm") == 0) {
             cmd_vm(argc, argv);  // VM management command
         } else if (strcmp(argv[0], "gui") == 0) {
-            cmd_gui(argc, argv);  // New GUI command
-        } else if (strcmp(argv[0], "panic") == 0) {
+            cmd_gui(argc, argv);  // New GUI command        } else if (strcmp(argv[0], "panic") == 0) {
             cmd_panic(argc, argv);  // Kernel panic test command
+        } else if (strcmp(argv[0], "preempt") == 0) {
+            cmd_preempt(argc, argv);  // Preemptive multitasking control        } else if (strcmp(argv[0], "taskdemo") == 0) {
+            cmd_taskdemo(argc, argv);  // Run multitasking demo
         } else {
             log_warning("SHELL", "Unknown command: %s", argv[0]);
             shell_println("Unknown command. Type 'help' for a list of commands.");
@@ -499,11 +501,11 @@ void cmd_help(int argc, char *argv[]) {
     shell_println("  reboot   - Reboot the system");
     shell_println("  vgademo  - Run VGA demonstration");
     shell_println("  log      - View and manage system logs");
-    shell_println("  vfs      - Virtual filesystem operations");
-    shell_println("  wdm      - Windows driver management");
+    shell_println("  vfs      - Virtual filesystem operations");    shell_println("  wdm      - Windows driver management");
     shell_println("  usb      - USB subsystem management");
     shell_println("  vm       - Manage virtual machines");
-    shell_println("  gui      - Graphical user interface commands");
+    shell_println("  gui      - Graphical user interface commands");    shell_println("  preempt  - Control preemptive multitasking");
+    shell_println("  taskdemo - Run multitasking demonstration");
     shell_println("  panic    - Test kernel panic handling (WARNING: crashes system)");
 }
 
@@ -557,6 +559,21 @@ void cmd_taskinfo(int argc, char *argv[]) {
     } else {
         shell_println("No active task");
     }
+    
+    // Display preemption status
+    shell_print("Preemptive Scheduling: ");
+    if (is_preemption_enabled()) {
+        shell_println("ENABLED");
+    } else {
+        shell_println("DISABLED");
+    }
+    
+    // Display timer information
+    shell_print("System Ticks: ");
+    uint64_t ticks = get_preemption_ticks();
+    // Simple conversion of uint64_t to string (only showing lower 32 bits for simplicity)
+    int_to_string((int)ticks, buffer);
+    shell_println(buffer);
     
     // Display table header
     shell_println("\nID  State    Stack Size  Name");
@@ -3168,4 +3185,129 @@ void cmd_panic(int argc, char *argv[]) {
     else {
         shell_println("Unknown panic type. Run 'panic' without arguments for usage.");
     }
+}
+
+/**
+ * Control preemptive multitasking system
+ * Usage: preempt [enable|disable|status]
+ */
+void cmd_preempt(int argc, char *argv[]) {
+    if (argc < 2) {
+        // Just show status if no arguments
+        shell_println("=== Preemptive Multitasking Control ===");
+        shell_print("Current status: ");
+        if (is_preemption_enabled()) {
+            shell_println("ENABLED");
+        } else {
+            shell_println("DISABLED");
+        }
+        shell_println("\nUsage: preempt [enable|disable|status|stats|reset]");
+        shell_println("  enable  - Enable preemptive task switching");
+        shell_println("  disable - Disable preemptive task switching");
+        shell_println("  status  - Show current preemptive multitasking status");
+        shell_println("  stats   - Show detailed preemption statistics");
+        shell_println("  reset   - Reset preemption statistics");
+        return;
+    }
+
+    if (strcmp(argv[1], "enable") == 0) {
+        shell_println("Enabling preemptive multitasking...");
+        enable_preemption();
+        shell_println("Preemptive multitasking is now enabled.");
+    } else if (strcmp(argv[1], "disable") == 0) {
+        shell_println("Disabling preemptive multitasking...");
+        disable_preemption();
+        shell_println("Preemptive multitasking is now disabled. Tasks must yield manually.");
+    } else if (strcmp(argv[1], "status") == 0) {
+        shell_print("Preemptive multitasking is currently: ");
+        if (is_preemption_enabled()) {
+            shell_println("ENABLED");
+        } else {
+            shell_println("DISABLED");
+        }
+        
+        // Display timer information
+        char buffer[32];
+        shell_print("System ticks: ");
+        int_to_string((int)get_preemption_ticks(), buffer);
+        shell_println(buffer);
+    } else if (strcmp(argv[1], "stats") == 0) {
+        // Display detailed statistics
+        shell_println("=== Preemptive Multitasking Statistics ===");
+        
+        // Get statistics
+        uint64_t involuntary = 0, voluntary = 0, timer_ints = 0, disabled_time = 0;
+        get_preemption_stats(&involuntary, &voluntary, &timer_ints, &disabled_time);
+        
+        char buffer[32];
+        
+        // Display statistics
+        shell_print("Timer interrupts: ");
+        int_to_string((int)timer_ints, buffer);
+        shell_println(buffer);
+        
+        shell_print("Involuntary task switches: ");
+        int_to_string((int)involuntary, buffer);
+        shell_println(buffer);
+        
+        shell_print("Voluntary task switches: ");
+        int_to_string((int)voluntary, buffer);
+        shell_println(buffer);
+        
+        shell_print("Total task switches: ");
+        int_to_string((int)(involuntary + voluntary), buffer);
+        shell_println(buffer);
+        
+        shell_print("Time spent with preemption disabled: ");
+        int_to_string((int)disabled_time, buffer);
+        shell_print(buffer);
+        shell_println(" ticks");
+        
+        // Calculate percentages
+        if (timer_ints > 0) {
+            int preemption_disabled_percent = (disabled_time * 100) / timer_ints;
+            shell_print("Percentage of time with preemption disabled: ");
+            int_to_string(preemption_disabled_percent, buffer);
+            shell_print(buffer);
+            shell_println("%");
+        }
+        
+        // Show system info
+        shell_print("Current task count: ");
+        int_to_string(get_task_count(), buffer);
+        shell_println(buffer);
+        
+        shell_print("Current task ID: ");
+        int_to_string(get_current_task_id(), buffer);
+        shell_println(buffer);
+    } else if (strcmp(argv[1], "reset") == 0) {
+        reset_preemption_stats();
+        shell_println("Preemption statistics have been reset.");
+    } else {
+        shell_println("Invalid argument. Use 'enable', 'disable', 'status', 'stats', or 'reset'.");
+    }
+}
+
+/**
+ * Run the multitasking demo
+ */
+void cmd_taskdemo(int argc, char *argv[]) {
+    log_debug("SHELL", "Starting multitasking demo");
+    
+    shell_println("Starting multitasking demonstration...");
+    shell_println("This will show two tasks running concurrently.");
+    shell_println("Use the 'preempt' command beforehand to enable/disable preemption.");
+    shell_println("Press any key to exit the demo when it's running.");
+    shell_println("Starting in 3 seconds...");
+    
+    // Small delay before starting demo
+    for (volatile int i = 0; i < 3000000; i++);
+    
+    // Include the task demo header
+    #include "task_demo.h"
+    
+    // Run the demo
+    start_multitasking_demo();
+    
+    shell_println("Multitasking demonstration completed.");
 }
