@@ -32,5 +32,8 @@ void cmd_taskman(int argc, char *argv[]); // New taskman command
 void cmd_panic(int argc, char *argv[]); // Kernel panic test command
 void cmd_preempt(int argc, char *argv[]); // Control preemptive multitasking
 void cmd_taskdemo(int argc, char *argv[]); // Run multitasking demo
+void cmd_crashdump(int argc, char *argv[]); // Crash dump analyzer command
+void cmd_debug_bp(int argc, char *argv[]); // Hardware breakpoint command
+void cmd_debug_trap(int argc, char *argv[]); // Debug trap command
 
 #endif // SHELL_H

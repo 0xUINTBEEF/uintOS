@@ -10,6 +10,7 @@ uintOS is an educational operating system demonstrating OS concepts, kernel deve
 - **Graphics**: VGA text mode with basic windowing and GUI framework
 - **Security**: Capability-based access control and resource isolation
 - **Power Management**: ACPI-compatible power states and thermal monitoring
+- **Debugging**: Hardware debug register support with breakpoint handling and crash dump analysis
 - **Drivers**: Comprehensive driver support for various device types including:
   - Display: Intel GPU with 2D acceleration
   - Input: PS/2 mouse interface
@@ -44,6 +45,9 @@ drivers/    - Device drivers
 - `gui start/shutdown` - GUI subsystem control
 - `power [state]` - Power management
 - `driver list/load/unload` - Driver management commands
+- `debug_bp set/clear/status` - Hardware breakpoint management
+- `debug_trap <type>` - Test debug exception types
+- `crashdump list/analyze` - Work with system crash dumps
 
 ## Building & Running
 1. Install x86 cross-compiler
@@ -61,8 +65,24 @@ uintOS features native hardware virtualization using Intel VT-x (VMX) extensions
 
 Note that while QEMU is used for development/testing purposes (to boot uintOS itself), the virtualization system within uintOS is completely independent and doesn't rely on QEMU.
 
+## Debug & Diagnostic Features
+
+uintOS includes powerful debugging and diagnostic capabilities:
+
+### Hardware Debug Registers
+- Support for x86 debug registers (DR0-DR7)
+- Hardware breakpoints on code execution, memory read/write
+- Single-step execution trapping
+- Debug exception handlers with detailed contextual information
+
+### Crash Dump System
+- Automatic crash dump generation during kernel panics
+- Capture of CPU state, call stack, memory regions, and debug registers
+- Post-mortem analysis via the crashdump utility
+- Support for multiple stored crash dumps with detailed diagnostics
+
 ## License
 MIT License
 
 ---
-*Last Updated: May 11, 2025*
+*Last Updated: May 12, 2025*

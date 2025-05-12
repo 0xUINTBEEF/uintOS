@@ -24,7 +24,12 @@ typedef enum {
     PANIC_UNEXPECTED_IRQ,    // Unexpected interrupt
     PANIC_HARDWARE_FAILURE,  // Hardware failure
     PANIC_DRIVER_ERROR,      // Driver error
-    PANIC_FS_ERROR           // File system error
+    PANIC_FS_ERROR,          // File system error
+    PANIC_SECURITY_VIOLATION, // Security violation (unauthorized access, etc.)
+    PANIC_DEADLOCK_DETECTED,  // Deadlock in synchronization primitives
+    PANIC_STACK_SMASHING,     // Stack corruption detected
+    PANIC_KERNEL_BOUNDS,      // Kernel memory bounds violation
+    PANIC_CRITICAL_RESOURCE   // Critical resource error
 } panic_type_t;
 
 /**

@@ -46,6 +46,11 @@ static const char* get_panic_type_string(panic_type_t type) {
         case PANIC_HARDWARE_FAILURE:  return "HARDWARE FAILURE";
         case PANIC_DRIVER_ERROR:      return "DRIVER ERROR";
         case PANIC_FS_ERROR:          return "FILE SYSTEM ERROR";
+        case PANIC_SECURITY_VIOLATION: return "SECURITY VIOLATION";
+        case PANIC_DEADLOCK_DETECTED:  return "DEADLOCK DETECTED";
+        case PANIC_STACK_SMASHING:     return "STACK SMASHING DETECTED";
+        case PANIC_KERNEL_BOUNDS:      return "KERNEL BOUNDS VIOLATION";
+        case PANIC_CRITICAL_RESOURCE:  return "CRITICAL RESOURCE ERROR";
         default:                      return "UNKNOWN ERROR";
     }
 }
@@ -90,6 +95,65 @@ static void capture_registers(uint32_t* eax, uint32_t* ebx, uint32_t* ecx, uint3
 }
 
 /**
+ * Dump memory content around a specific address
+ */
+static void dump_memory(void* address, size_t bytes_before, size_t bytes_after) {
+    uint8_t* start = (uint8_t*)address - bytes_before;
+    uint8_t* end = (uint8_t*)address + bytes_after;
+    
+    // Align to 16-byte boundary for cleaner output
+    start = (uint8_t*)((uintptr_t)start & ~0xF);
+    
+    vga_write_string("\nMemory dump around 0x");
+    print_hex((uint32_t)address, 8);
+    vga_write_string(":\n");
+    
+    // For safety, avoid excessively large dumps and potentially invalid addresses
+    size_t total_bytes = (uintptr_t)end - (uintptr_t)start;
+    if (total_bytes > 512) {
+        total_bytes = 512;
+        end = start + total_bytes;
+    }
+    
+    // Check pointer validity - very basic check
+    if ((uintptr_t)start < 0x1000 || (uintptr_t)end > 0xFFFFFFFF) {
+        vga_write_string("Invalid memory address range - cannot dump\n");
+        return;
+    }
+    
+    char ascii_buffer[17] = {0};
+    
+    // Display memory in hex and ASCII format, 16 bytes per line
+    for (uint8_t* ptr = start; ptr < end; ptr += 16) {
+        // Print address
+        vga_write_string("0x");
+        print_hex((uint32_t)ptr, 8);
+        vga_write_string(": ");
+        
+        // Print hex values
+        for (int i = 0; i < 16; i++) {
+            if (ptr + i < end) {
+                uint8_t value = ptr[i];
+                print_hex(value, 2);
+                vga_write_string(" ");
+                
+                // Store printable ASCII character or '.' for non-printable
+                ascii_buffer[i] = (value >= 32 && value <= 126) ? value : '.';
+            } else {
+                vga_write_string("   ");
+                ascii_buffer[i] = ' ';
+            }
+        }
+        
+        // Print ASCII representation
+        ascii_buffer[16] = 0;
+        vga_write_string(" | ");
+        vga_write_string(ascii_buffer);
+        vga_write_string("\n");
+    }
+}
+
+/**
  * Generate a simple stack trace
  */
 static void generate_stack_trace(uint32_t ebp) {
@@ -107,6 +171,11 @@ static void generate_stack_trace(uint32_t ebp) {
         vga_write_string("] 0x");
         print_hex((uint32_t)saved_eip, 8);
         vga_write_string("\n");
+        
+        // Memory dump around the EIP for additional context
+        if (i == 0) {
+            dump_memory(saved_eip, 16, 32);
+        }
         
         frame_ptr = (uint32_t*)(frame_ptr[0]);
     }
@@ -206,6 +275,42 @@ static void display_panic_info(panic_type_t type, const char* file, int line,
 }
 
 /**
+ * Get basic system state information
+ */
+static void get_system_state(char* buffer, size_t buffer_size) {
+    extern uint64_t uptime_ticks; // Assuming this exists in your kernel
+    
+    snprintf(buffer, buffer_size, 
+             "Uptime: %llds, Last Task: %s, Mode: %s",
+             uptime_ticks / 1000,  // Convert to seconds
+             "Unknown",            // Replace with actual last task info
+             "Unknown");           // Replace with actual kernel mode info
+}
+
+/**
+ * Record panic crash dump for post-mortem analysis
+ */
+static void record_crash_dump(panic_type_t type, const char* file, int line,
+                             const char* func, const char* message,
+                             interrupt_frame_t* frame) {
+    // Create a crash dump file with all relevant system information
+    extern bool crash_dump_create(
+        panic_type_t type, 
+        const char* file, 
+        int line, 
+        const char* func, 
+        const char* message,
+        interrupt_frame_t* frame
+    );
+
+    if (crash_dump_create(type, file, line, func, message, frame)) {
+        log_info("PANIC", "Created crash dump for post-mortem analysis");
+    } else {
+        log_error("PANIC", "Failed to create crash dump");
+    }
+}
+
+/**
  * Initiate a kernel panic
  */
 void kernel_panic(panic_type_t type, const char* file, int line, 
@@ -236,6 +341,49 @@ void kernel_panic(panic_type_t type, const char* file, int line,
     
     // Flush all logs
     flush_logs();
+    
+    // Capture current register state for the crash dump
+    interrupt_frame_t frame;
+    memset(&frame, 0, sizeof(frame));
+    
+    // Get EIP and ESP using the frame pointer
+    uint32_t ebp;
+    asm volatile("mov %%ebp, %0" : "=r"(ebp));
+    
+    // If we have a valid frame pointer, get the caller's info
+    if (ebp != 0) {
+        uint32_t* ebp_ptr = (uint32_t*)ebp;
+        frame.eip = ebp_ptr[1];  // Return address is at ebp+4
+        frame.esp = ebp + 8;     // Estimated stack pointer
+        
+        // Get EFLAGS (simplified - actual flags will be approximated)
+        uint32_t eflags;
+        asm volatile("pushf; pop %0" : "=r"(eflags));
+        frame.eflags = eflags;
+        
+        // Get segment registers
+        asm volatile("mov %%cs, %0" : "=r"(frame.cs));
+        asm volatile("mov %%ss, %0" : "=r"(frame.ss));
+    }
+    
+    // Get other general purpose registers
+    asm volatile(
+        "mov %%eax, %0\n"
+        "mov %%ebx, %1\n"
+        "mov %%ecx, %2\n"
+        "mov %%edx, %3\n"
+        "mov %%esi, %4\n"
+        "mov %%edi, %5\n"
+        "mov %%ebp, %6\n"
+        : "=m"(frame.eax), "=m"(frame.ebx), "=m"(frame.ecx), "=m"(frame.edx),
+          "=m"(frame.esi), "=m"(frame.edi), "=m"(frame.ebp)
+        :
+        : "memory"
+    );
+    
+    // Try to record crash dump information for post-mortem analysis
+    // This must happen before callbacks, since callbacks might corrupt more state
+    record_crash_dump(type, file, line, func, panic_message_buffer, &frame);
     
     // Notify any registered callbacks
     notify_panic_callbacks();

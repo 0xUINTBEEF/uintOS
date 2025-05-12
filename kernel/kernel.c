@@ -13,6 +13,8 @@
 #include "module.h" // Include the module system header
 #include "syscall.h" // Include the syscall header
 #include "preempt.h" // Include preemptive scheduling header
+#include "exception_handlers.h" // Include exception handlers
+#include "irq_asm.h" // Include assembly IRQ handling
 #include "../filesystem/fat12.h"
 #include "../memory/paging.h"
 #include "../memory/heap.h"
@@ -404,9 +406,14 @@ void initialize_system() {
     // Initialize hardware and kernel subsystems
     log_info("KERNEL", "Initializing GDT and TSS...");
     initialize_gdt(&initial_task_state);
-    
-    log_info("KERNEL", "Initializing interrupt system...");
+      log_info("KERNEL", "Initializing interrupt system...");
     uintos_initialize_interrupts();
+    
+    // Initialize CPU exception handlers
+    log_info("KERNEL", "Initializing exception handlers...");
+    exception_init();
+    irq_asm_install();
+    log_info("KERNEL", "Exception handlers initialized");
     
     // Initialize system call interface
     log_info("KERNEL", "Initializing system call interface...");

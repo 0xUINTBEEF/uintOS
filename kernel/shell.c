@@ -7,6 +7,8 @@
 #include "../memory/heap.h"
 #include "task.h"
 #include "logging/log.h"
+#include "panic.h"
+#include "test/panic_test.h"
 
 // ANSI color codes
 #define COLOR_RESET "\033[0m"
@@ -444,11 +446,12 @@ void shell_execute_command(const char *command) {
         } else if (strcmp(argv[0], "reboot") == 0) {
             cmd_reboot(argc, argv);
         } else if (strcmp(argv[0], "memstat") == 0) {
-            cmd_memstat(argc, argv);
-        } else if (strcmp(argv[0], "memtest") == 0) {
+            cmd_memstat(argc, argv);        } else if (strcmp(argv[0], "memtest") == 0) {
             cmd_memtest(argc, argv);
         } else if (strcmp(argv[0], "ls") == 0) {
             cmd_ls(argc, argv);
+        } else if (strcmp(argv[0], "panic") == 0) {
+            cmd_panic(argc, argv);
         } else if (strcmp(argv[0], "cat") == 0) {
             cmd_cat(argc, argv);
         } else if (strcmp(argv[0], "vgademo") == 0) {
@@ -465,10 +468,15 @@ void shell_execute_command(const char *command) {
             cmd_vm(argc, argv);  // VM management command
         } else if (strcmp(argv[0], "gui") == 0) {
             cmd_gui(argc, argv);  // New GUI command        } else if (strcmp(argv[0], "panic") == 0) {
-            cmd_panic(argc, argv);  // Kernel panic test command
-        } else if (strcmp(argv[0], "preempt") == 0) {
-            cmd_preempt(argc, argv);  // Preemptive multitasking control        } else if (strcmp(argv[0], "taskdemo") == 0) {
-            cmd_taskdemo(argc, argv);  // Run multitasking demo
+            cmd_panic(argc, argv);  // Kernel panic test command        } else if (strcmp(argv[0], "preempt") == 0) {
+            cmd_preempt(argc, argv);  // Preemptive multitasking control
+        } else if (strcmp(argv[0], "taskdemo") == 0) {
+            cmd_taskdemo(argc, argv);  // Run multitasking demo        } else if (strcmp(argv[0], "crashdump") == 0) {
+            cmd_crashdump(argc, argv);  // Crash dump analyzer utility
+        } else if (strcmp(argv[0], "debug_bp") == 0) {
+            cmd_debug_bp(argc, argv);  // Hardware debug breakpoint management
+        } else if (strcmp(argv[0], "debug_trap") == 0) {
+            cmd_debug_trap(argc, argv);  // Debug trap testing
         } else {
             log_warning("SHELL", "Unknown command: %s", argv[0]);
             shell_println("Unknown command. Type 'help' for a list of commands.");
@@ -490,8 +498,7 @@ void cmd_help(int argc, char *argv[]) {
     shell_println("uintOS Shell Commands:");
     shell_println("  help     - Display this help message");
     shell_println("  clear    - Clear the screen");
-    shell_println("  echo     - Display a message");
-    shell_println("  ls       - List directory contents");
+    shell_println("  echo     - Display a message");    shell_println("  ls       - List directory contents");
     shell_println("  cat      - Display file contents");
     shell_println("  meminfo  - Display basic memory information");
     shell_println("  memstat  - Display detailed memory statistics");
@@ -507,6 +514,19 @@ void cmd_help(int argc, char *argv[]) {
     shell_println("  gui      - Graphical user interface commands");    shell_println("  preempt  - Control preemptive multitasking");
     shell_println("  taskdemo - Run multitasking demonstration");
     shell_println("  panic    - Test kernel panic handling (WARNING: crashes system)");
+      // Debug and crash analysis tools
+    shell_println("\nDebug and Analysis Tools:");
+    shell_println("  crashdump - Analyze system crash dumps");
+    shell_println("      list    - List available crash dumps");
+    shell_println("      analyze - Analyze a specific crash dump");
+    shell_println("  debug_bp  - Hardware debug breakpoint management");
+    shell_println("      set     - Set a hardware breakpoint");
+    shell_println("      clear   - Clear a hardware breakpoint");
+    shell_println("      status  - Display current breakpoints");
+    shell_println("  debug_trap - Test debug traps and exceptions");
+    shell_println("      0       - Software breakpoint (INT3)");
+    shell_println("      1       - Single-step trap");
+    shell_println("      2-4     - Hardware breakpoint types");
 }
 
 void cmd_clear(int argc, char *argv[]) {
@@ -3310,4 +3330,50 @@ void cmd_taskdemo(int argc, char *argv[]) {
     start_multitasking_demo();
     
     shell_println("Multitasking demonstration completed.");
+}
+
+/**
+ * Command: panic - Test the kernel panic system
+ */
+static void cmd_panic(int argc, char *argv[]) {
+    if (argc < 2) {
+        vga_write_string("Usage: panic <test-type>\n");
+        vga_write_string("Available test types:\n");
+        vga_write_string("  pagefault     - Trigger a page fault\n");
+        vga_write_string("  divzero       - Trigger a division by zero\n");
+        vga_write_string("  stackoverflow - Trigger a stack overflow\n");
+        vga_write_string("  assert        - Trigger an assertion failure\n");
+        vga_write_string("  general       - Trigger a general kernel panic\n");
+        vga_write_string("\nWARNING: Running this command will crash the system!\n");
+        return;
+    }
+    
+    panic_test_type_t test_type;
+    
+    if (strcmp(argv[1], "pagefault") == 0) {
+        test_type = PANIC_TEST_PAGE_FAULT;
+    } else if (strcmp(argv[1], "divzero") == 0) {
+        test_type = PANIC_TEST_DIVISION_BY_ZERO;
+    } else if (strcmp(argv[1], "stackoverflow") == 0) {
+        test_type = PANIC_TEST_STACK_OVERFLOW;
+    } else if (strcmp(argv[1], "assert") == 0) {
+        test_type = PANIC_TEST_ASSERTION;
+    } else if (strcmp(argv[1], "general") == 0) {
+        test_type = PANIC_TEST_GENERAL;
+    } else {
+        vga_write_string("Unknown test type: ");
+        vga_write_string(argv[1]);
+        vga_write_string("\n");
+        return;
+    }
+    
+    vga_write_string("Running panic test. System will crash...\n");
+    
+    // Give the user a moment to read the message
+    for (int i = 0; i < 1000000; i++) {
+        asm volatile("nop");
+    }
+    
+    // Run the selected panic test
+    run_panic_tests(test_type);
 }
