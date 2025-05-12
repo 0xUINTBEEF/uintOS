@@ -4,6 +4,8 @@
 section .text
 global syscall_asm_handler
 extern syscall_handle
+extern install_stack_canary
+extern verify_stack_canary
 
 ; This handler is called when int 0x80 is executed
 ; Registers:
@@ -32,13 +34,30 @@ syscall_asm_handler:
     mov [esp+16], edi   ; arg5
     mov [esp+20], ebp   ; arg6
     
+    ; Reserve space for stack canary
+    sub esp, 4
+    
+    ; Install stack canary
+    push esp            ; Pass canary location as parameter
+    call install_stack_canary
+    add esp, 4          ; Clean up parameter
+    
     ; Call the C handler with syscall number and args pointer
-    push esp            ; args pointer
+    push esp            ; args pointer (points to args structure)
+    add dword [esp], 4  ; Adjust pointer to skip canary
     push eax            ; syscall number
     call syscall_handle
     
-    ; Clean up stack
+    ; Clean up handler parameters
     add esp, 8          ; Remove parameters from stack
+    
+    ; Verify stack canary
+    push esp            ; Pass canary location
+    call verify_stack_canary
+    add esp, 4          ; Clean up parameter
+    
+    ; Clean up canary and args structure
+    add esp, 4          ; Remove canary
     add esp, 24         ; Remove syscall_args structure
     
     ; Restore registers

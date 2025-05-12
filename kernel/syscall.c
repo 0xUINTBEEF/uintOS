@@ -6,8 +6,10 @@
 #include "logging/log.h"
 #include "../filesystem/vfs/vfs.h"
 #include "security.h"
+#include "security_syscall.h"
 #include "panic.h"
 #include "module.h"
+#include "memory/vmm.h"
 
 // Error codes for system calls
 #define EPERM           1      // Operation not permitted
@@ -63,7 +65,10 @@ void syscall_init(void) {
     syscall_register(SYS_MMAP, sys_mmap_handler);
     syscall_register(SYS_MUNMAP, sys_munmap_handler);
     
-    log_info("KERNEL", "Syscall interface initialized with %d handlers", SYS_MAX);
+    // Initialize syscall security
+    syscall_security_init();
+    
+    log_info("KERNEL", "Syscall interface initialized with %d handlers and enhanced security", SYS_MAX);
 }
 
 // Register a syscall handler
@@ -85,6 +90,23 @@ syscall_handler_t syscall_get_handler(uint64_t syscall_num) {
     return syscall_handlers[syscall_num];
 }
 
+#include "syscall_wrappers.h"
+
+// Forward declarations for specific system call handlers
+int64_t sys_read_handler(syscall_args_t *args);
+int64_t sys_write_handler(syscall_args_t *args);
+int64_t sys_open_handler(syscall_args_t *args);
+int64_t sys_close_handler(syscall_args_t *args);
+int64_t sys_waitpid_handler(syscall_args_t *args);
+int64_t sys_execve_handler(syscall_args_t *args);
+int64_t sys_time_handler(syscall_args_t *args);
+int64_t sys_getpid_handler(syscall_args_t *args);
+int64_t sys_yield_handler(syscall_args_t *args);
+int64_t sys_module_load_handler(syscall_args_t *args);
+int64_t sys_module_unload_handler(syscall_args_t *args);
+int64_t sys_mmap_handler(syscall_args_t *args);
+int64_t sys_munmap_handler(syscall_args_t *args);
+
 // Handle a syscall
 int64_t syscall_handle(uint64_t syscall_num, syscall_args_t* args) {
     // Validate parameters
@@ -93,11 +115,50 @@ int64_t syscall_handle(uint64_t syscall_num, syscall_args_t* args) {
         return -EFAULT;
     }
     
+    // Security check: Ensure syscall number is valid using whitelist approach
+    if (!is_valid_syscall(syscall_num)) {
+        log_warn("SECURITY", "Invalid syscall number: %d", syscall_num);
+        security_monitor_record_event(
+            SEC_EVENT_UNAUTHORIZED_ACCESS,
+            2, // Medium severity
+            SID_SYSTEM,
+            SID_SYSTEM,
+            "syscall",
+            syscall_num,
+            0, // Not successful
+            "Invalid syscall number"
+        );
+        return -EINVAL;
+    }
+    
+    // Special handling for security-critical syscalls that need argument validation
+    // Direct calls to secure wrappers for the most security-critical syscalls
+    switch(syscall_num) {
+        case SYS_READ:
+            return secure_sys_read(args);
+            
+        case SYS_WRITE:
+            return secure_sys_write(args);
+            
+        case SYS_OPEN:
+            return secure_sys_open(args);
+            
+        case SYS_EXECVE:
+            return secure_sys_execve(args);
+            
+        case SYS_MMAP:
+            return secure_sys_mmap(args);
+            
+        default:
+            // For other syscalls, follow the regular handler lookup path
+            break;
+    }
+    
     // Get the handler for this syscall
     syscall_handler_t handler = syscall_get_handler(syscall_num);
     
     if (handler == NULL) {
-        log_warn("KERNEL", "Invalid syscall number: %d", syscall_num);
+        log_warn("KERNEL", "Unimplemented syscall number: %d", syscall_num);
         return -EINVAL;
     }
     
