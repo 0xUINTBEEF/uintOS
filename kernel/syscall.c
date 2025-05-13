@@ -60,10 +60,10 @@ void syscall_init(void) {
     syscall_register(SYS_TIME, sys_time_handler);
     syscall_register(SYS_GETPID, sys_getpid_handler);
     syscall_register(SYS_YIELD, sys_yield_handler);
-    syscall_register(SYS_MODULE_LOAD, sys_module_load_handler);
-    syscall_register(SYS_MODULE_UNLOAD, sys_module_unload_handler);
+    syscall_register(SYS_MODULE_LOAD, sys_module_load_handler);    syscall_register(SYS_MODULE_UNLOAD, sys_module_unload_handler);
     syscall_register(SYS_MMAP, sys_mmap_handler);
     syscall_register(SYS_MUNMAP, sys_munmap_handler);
+    syscall_register(SYS_ASLR_CONTROL, sys_aslr_control_handler);
     
     // Initialize syscall security
     syscall_security_init();

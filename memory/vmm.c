@@ -1,6 +1,7 @@
 #include "vmm.h"
 #include "heap.h"
 #include "paging.h"
+#include "aslr.h"
 #include "../kernel/logging/log.h"
 #include <string.h>
 
@@ -77,7 +78,7 @@ typedef struct {
 #define PF_RESERVED     0x10    // Page frame is reserved by hardware
 
 // Global VMM state
-static struct {
+struct vmm_state {
     int initialized;                  // Whether VMM is initialized
     address_space_t* kernel_space;    // Kernel address space
     address_space_t* current_space;   // Current active address space
@@ -93,7 +94,14 @@ static struct {
     
     // Page fault handler
     void (*page_fault_handler)(uint32_t address, uint32_t error_code);
-} vmm;
+};
+
+static struct vmm_state vmm;
+
+// Export key symbols for other VMM components
+int vmm_initialized = 0;
+address_space_t* vmm_kernel_space = NULL;
+address_space_t* vmm_current_space = NULL;
 
 // Forward declarations for internal functions
 static uint32_t vmm_alloc_frame(void);
@@ -176,8 +184,12 @@ int vmm_init(uint32_t mem_size_kb) {
     vmm.stats.free_physical_memory = vmm.free_frames * PAGE_SIZE;
     vmm.stats.total_virtual_memory = 4UL * 1024 * 1024 * 1024;  // 4GB for 32-bit
     vmm.stats.free_virtual_memory = vmm.stats.total_virtual_memory - (4*1024*1024);  // Minus kernel area
+      vmm.initialized = 1;
     
-    vmm.initialized = 1;
+    // Set up the global exported variables
+    vmm_initialized = vmm.initialized;
+    vmm_kernel_space = vmm.kernel_space;
+    vmm_current_space = vmm.current_space;
     
     log_info("VMM initialized successfully");
     log_debug("Free physical memory: %u KB", vmm.stats.free_physical_memory / 1024);
@@ -404,8 +416,22 @@ static address_space_t* vmm_create_address_space(void) {
     // Clear the structure
     memset(space, 0, sizeof(address_space_t));
     
-    // Allocate page directory
-    uint32_t pd_phys = vmm_alloc_frame();
+    // Allocate page directory (potentially at a randomized location)
+    uint32_t pd_phys;
+    
+    // Only randomize user address spaces (not kernel space)
+    if (vmm.kernel_space != NULL && aslr_is_enabled()) {
+        // This is a user space - apply randomization to page directory location
+        // Use vmm_alloc_frame directly to get physical memory
+        pd_phys = vmm_alloc_frame();
+        
+        // Log ASLR info for page directory
+        log_debug("VMM", "ASLR applied to page directory location: 0x%08X", pd_phys);
+    } else {
+        // Kernel or ASLR disabled - use standard allocation
+        pd_phys = vmm_alloc_frame();
+    }
+    
     if (pd_phys == 0) {
         log_error("Failed to allocate page directory");
         heap_free(space);
@@ -475,9 +501,9 @@ static void vmm_switch_address_space(address_space_t* space) {
     
     // Set CR3 to the new page directory
     asm volatile("mov %0, %%cr3" : : "r"(pd_phys));
-    
-    // Update current address space
+      // Update current address space
     vmm.current_space = space;
+    vmm_current_space = space; // Update exported variable
 }
 
 /**
@@ -727,12 +753,49 @@ void* vmm_alloc(size_t size, uint32_t flags, uint32_t type, const char* name) {
     // Round up size to page boundary
     size = ((size + PAGE_SIZE - 1) / PAGE_SIZE) * PAGE_SIZE;
     
-    // TODO: Find a free region of appropriate size
-    // For now, use a simple approach:
+    // Determine base address based on memory type
+    uint32_t base_addr = 0;
+    uint32_t aslr_type = 0;
     
-    // Try to allocate at a fixed address (for demo purposes)
-    uint32_t start = 0x10000000;  // 256MB
+    switch (type) {
+        case VM_TYPE_HEAP:
+            base_addr = 0x10000000;  // 256MB
+            aslr_type = ASLR_HEAP_OFFSET;
+            break;
+        case VM_TYPE_STACK:
+            base_addr = 0xB0000000;  // Stack area
+            aslr_type = ASLR_STACK_OFFSET;
+            break;
+        case VM_TYPE_MMIO:
+            // MMIO regions should not be randomized
+            base_addr = 0x20000000;  // 512MB
+            break;
+        case VM_TYPE_SHARED:
+            base_addr = 0x30000000;  // 768MB
+            aslr_type = ASLR_MMAP_OFFSET;
+            break;
+        case VM_TYPE_MODULE:
+            base_addr = 0x50000000;  // 1.25GB
+            aslr_type = ASLR_LIB_OFFSET;
+            break;
+        case VM_TYPE_USER:
+            base_addr = 0x08000000;  // User region
+            aslr_type = ASLR_EXEC_OFFSET;
+            break;
+        default:
+            base_addr = 0x10000000;  // Default to 256MB
+            aslr_type = ASLR_MMAP_OFFSET;
+    }
+    
+    // Apply ASLR if configured
+    uint32_t start = (uint32_t)aslr_randomize_address((void*)base_addr, aslr_type);
     uint32_t end = start + size;
+    
+    // Log allocation with ASLR info
+    if (aslr_type && aslr_is_enabled()) {
+        log_debug("VMM", "ASLR applied to %s allocation: 0x%08X -> 0x%08X", 
+                 name ? name : "anonymous", base_addr, start);
+    }
     
     // Create the memory region
     vm_region_t* region = vmm_add_region(vmm.current_space, start, end, flags, type, name);

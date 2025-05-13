@@ -1,6 +1,8 @@
 #include "security.h"
 #include "memory/heap.h"
 #include "logging/log.h"
+#include "scheduler.h"
+#include "task.h"
 #include <string.h>
 
 /**
@@ -506,7 +508,48 @@ bool security_check_syscall_permission(struct task* task, uint64_t syscall_num) 
                 log_warn("SECURITY", "Unrecognized syscall %llu by task %d", 
                          syscall_num, task->id);
                 return false;
-            }
+            }            return true;
+    }
+}
+
+/**
+ * Check if the current task has a specific privilege level
+ * 
+ * @param privilege_level Privilege level to check for
+ * @return true if the current task has the specified privilege, false otherwise
+ */
+bool security_check_privilege(uint32_t privilege_level) {
+    task_t* current_task = scheduler_get_current_task();
+    
+    // If no task is running (early boot), return true
+    if (!current_task) {
+        return true;
+    }
+    
+    // Check privilege level based on task type
+    switch (privilege_level) {
+        case PRIV_NONE:
+            // Anyone has PRIV_NONE
             return true;
+            
+        case PRIV_USER:
+            // Any task can perform basic user operations
+            return true;
+            
+        case PRIV_SYSTEM_SERVICE:
+            // Only system and kernel tasks can do system service operations
+            return (current_task->privilege_level <= TASK_PRIV_SYSTEM);
+            
+        case PRIV_SECURITY_ADMIN:
+            // Only kernel and driver tasks can do security admin operations
+            return (current_task->privilege_level <= TASK_PRIV_DRIVER);
+            
+        case PRIV_KERNEL:
+            // Only kernel tasks can do kernel operations
+            return (current_task->privilege_level == TASK_PRIV_KERNEL);
+            
+        default:
+            log_warn("SECURITY", "Unknown privilege level check: 0x%08x", privilege_level);
+            return false;
     }
 }

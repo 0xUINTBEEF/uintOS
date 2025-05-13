@@ -26,6 +26,7 @@
 #define SYS_YIELD           19
 #define SYS_MODULE_LOAD     20
 #define SYS_MODULE_UNLOAD   21
+#define SYS_ASLR_CONTROL    22
 
 // Maximum supported syscall number
 #define SYS_MAX             50
@@ -65,6 +66,9 @@ void syscall_entry_handler(uint64_t syscall_num, syscall_args_t* args);
 
 // Function to get system time in seconds
 uint64_t get_system_time(void);
+
+// ASLR control function
+int sys_aslr_control(int operation, uint32_t arg);
 
 // Helper macro to make a system call from user space
 // This will be used in the user-space libc implementation

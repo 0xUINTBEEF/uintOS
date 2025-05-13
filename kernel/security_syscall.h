@@ -7,6 +7,25 @@
 #include "syscall.h"
 
 /**
+ * ASLR control operations
+ */
+#define ASLR_OP_GET_STATUS      0  // Get current ASLR status
+#define ASLR_OP_SET_STATUS      1  // Enable/disable ASLR
+#define ASLR_OP_GET_ENTROPY     2  // Get current entropy bits
+#define ASLR_OP_SET_ENTROPY     3  // Set entropy bits
+#define ASLR_OP_GET_REGIONS     4  // Get which regions are randomized
+#define ASLR_OP_SET_REGIONS     5  // Set which regions to randomize
+
+/**
+ * ASLR control system call 
+ * 
+ * @param operation One of the ASLR_OP_* values
+ * @param arg Operation-specific argument
+ * @return Operation result, or -1 on error
+ */
+int sys_aslr_control(int operation, uint32_t arg);
+
+/**
  * Initialize syscall security features
  */
 void syscall_security_init(void);

@@ -1,6 +1,7 @@
 #include "security_syscall.h"
 #include "security.h"
 #include "memory/vmm.h"
+#include "memory/aslr.h"
 #include "panic.h"
 #include "logging/log.h"
 #include <stdint.h>

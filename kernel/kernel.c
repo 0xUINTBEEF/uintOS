@@ -419,8 +419,7 @@ void initialize_system() {
     log_info("KERNEL", "Initializing system call interface...");
     syscall_init();
     log_info("KERNEL", "System call interface initialized");
-    
-    // Initialize device management system
+      // Initialize device management system
     log_info("KERNEL", "Initializing device manager...");
     int device_manager_result = device_manager_init();
     if (device_manager_result != 0) {
@@ -428,6 +427,11 @@ void initialize_system() {
     } else {
         log_info("KERNEL", "Device manager initialized successfully");
     }
+    
+    // Initialize kernel subsystems (including ASLR)
+    log_info("KERNEL", "Initializing kernel subsystems...");
+    kernel_init_subsystems();
+    log_info("KERNEL", "Kernel subsystems initialized");
 
     // Initialize module management system
     log_info("KERNEL", "Initializing module system...");

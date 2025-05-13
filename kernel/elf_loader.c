@@ -1,6 +1,7 @@
 #include "elf_loader.h"
 #include "memory/vmm.h"
 #include "memory/heap.h"
+#include "memory/aslr.h"
 #include "logging/log.h"
 #include "task.h"
 #include "scheduler.h"
@@ -131,9 +132,12 @@ elf_load_status_t elf_load_executable(const char* path, elf_process_info_t* proc
         heap_free(file_data);
         return status;
     }
-    
-    // Set entry point
-    process_info->entry_point = (void*)header->e_entry;
+      // Set entry point, applying load bias for PIE
+    if (process_info->is_pie) {
+        process_info->entry_point = (void*)(header->e_entry + process_info->load_bias);
+    } else {
+        process_info->entry_point = (void*)header->e_entry;
+    }
     
     // Check if this is a dynamically linked executable
     Elf64_Phdr* phdr = (Elf64_Phdr*)((uintptr_t)file_data + header->e_phoff);
@@ -168,8 +172,7 @@ elf_load_status_t elf_map_segments(Elf64_Ehdr* header, void* file_data, size_t f
     
     // Get program headers
     Elf64_Phdr* phdr = (Elf64_Phdr*)((uintptr_t)file_data + header->e_phoff);
-    
-    // First pass: identify memory boundaries
+      // First pass: identify memory boundaries
     uint64_t min_vaddr = UINT64_MAX;
     uint64_t max_vaddr = 0;
     
@@ -198,6 +201,22 @@ elf_load_status_t elf_map_segments(Elf64_Ehdr* header, void* file_data, size_t f
     size_t total_size = max_vaddr - min_vaddr;
     process_info->total_memory = total_size;
     
+    // Check if this is a PIE (Position Independent Executable)
+    bool is_pie = (header->e_type == ET_DYN);
+    process_info->is_pie = is_pie;
+    
+    // For PIE executables, apply ASLR if enabled
+    uint64_t load_bias = 0;
+    if (is_pie && aslr_is_enabled()) {
+        // Apply ASLR to executables - generate a random base address
+        load_bias = (uint64_t)aslr_get_random_offset(ASLR_EXEC_OFFSET);
+        // Ensure proper alignment for the load bias
+        load_bias = (load_bias & ~(PAGE_SIZE - 1));
+        process_info->load_bias = load_bias;
+        
+        log_info("PIE executable detected, applying ASLR with bias: 0x%llx", load_bias);
+    }
+    
     log_info("ELF memory range: 0x%llx - 0x%llx (size: %llu bytes)", 
              min_vaddr, max_vaddr, total_size);
     
@@ -208,12 +227,16 @@ elf_load_status_t elf_map_segments(Elf64_Ehdr* header, void* file_data, size_t f
         if (phdr->p_type != PT_LOAD) {
             continue;
         }
-        
-        // Calculate segment addresses, aligned to page boundaries
+          // Calculate segment addresses, aligned to page boundaries
         uint64_t seg_vaddr = phdr->p_vaddr;
         uint64_t seg_size = phdr->p_memsz;
         uint64_t file_offset = phdr->p_offset;
         uint64_t file_size_seg = phdr->p_filesz;
+        
+        // Apply load bias for PIE executables
+        if (process_info->is_pie) {
+            seg_vaddr += process_info->load_bias;
+        }
         
         // Flags for memory mapping
         uint32_t prot = 0;
@@ -283,9 +306,18 @@ elf_load_status_t elf_map_segments(Elf64_Ehdr* header, void* file_data, size_t f
     
     // Set up program break (heap start)
     process_info->program_break = process_info->bss_end;
-    
-    // Allocate and map user stack
+      // Allocate and map user stack
     uint64_t stack_top = 0x7FFFFFFFF000ULL;  // Near top of user virtual address space
+    
+    // Apply ASLR to stack if enabled
+    if (aslr_is_enabled()) {
+        // Randomize stack location
+        stack_top = (uint64_t)aslr_randomize_address((void*)stack_top, ASLR_STACK_OFFSET);
+        // Ensure proper alignment
+        stack_top = (stack_top & ~0xFULL);
+        log_info("ASLR applied to stack: 0x%llx", stack_top);
+    }
+    
     uint64_t stack_bottom = stack_top - USER_STACK_SIZE;
     
     // Map stack memory
@@ -337,9 +369,7 @@ int elf_create_process(elf_process_info_t* process_info, const char* process_nam
     if (!task->stack) {
         heap_free(task);
         return -1;
-    }
-    
-    // Set up task context for ELF process
+    }    // Set up task context for ELF process
     task_setup_context(task);
     
     // Configure task context for user mode
@@ -348,6 +378,16 @@ int elf_create_process(elf_process_info_t* process_info, const char* process_nam
     // Register task in scheduler
     int task_id = scheduler_create_task_from_state(task);
     if (task_id < 0) {
+        heap_free(task->stack);
+        heap_free(task);
+        return -1;
+    }
+    
+    // Create memory space for the process (with ASLR)
+    int vm_result = vmm_create_process_space(task_id);
+    if (vm_result != 0) {
+        log_error("ELF", "Failed to create memory space for process %d", task_id);
+        scheduler_remove_task(task_id);
         heap_free(task->stack);
         heap_free(task);
         return -1;

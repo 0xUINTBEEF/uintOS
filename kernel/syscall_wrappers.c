@@ -4,6 +4,7 @@
 #include "logging/log.h"
 #include "../filesystem/vfs/vfs.h"
 #include "memory/vmm.h"
+#include "memory/aslr.h"
 #include <string.h>
 #include <stddef.h>
 
@@ -307,7 +308,37 @@ int64_t secure_sys_mmap(syscall_args_t *args) {
         log_warn("SYSCALL", "sys_mmap: Invalid protection flags %x", prot);
         return -EINVAL;
     }
-    
-    // Call the actual mmap function
+      // Call the actual mmap function
     return (int64_t)sys_mmap_handler(args);
+}
+
+/**
+ * ASLR control syscall handler wrapper
+ * 
+ * @param args Syscall arguments
+ * @return Result of ASLR control operation
+ */
+int64_t sys_aslr_control_handler(syscall_args_t* args) {
+    int operation = (int)args->arg1;
+    uint32_t arg = (uint32_t)args->arg2;
+    
+    // Validate operation code
+    if (operation < ASLR_OP_GET_STATUS || operation > ASLR_OP_SET_REGIONS) {
+        log_warn("SYSCALL", "Invalid ASLR operation code: %d", operation);
+        return -EINVAL;
+    }
+    
+    // Validate arguments based on operation
+    if (operation == ASLR_OP_SET_ENTROPY && (arg < 8 || arg > 24)) {
+        log_warn("SYSCALL", "Invalid ASLR entropy setting: %u (must be 8-24)", arg);
+        return -EINVAL;
+    }
+    
+    if (operation == ASLR_OP_SET_REGIONS && (arg & ~ASLR_ALL) != 0) {
+        log_warn("SYSCALL", "Invalid ASLR regions mask: 0x%08x", arg);
+        return -EINVAL;
+    }
+    
+    // Call the actual ASLR control implementation
+    return (int64_t)sys_aslr_control(operation, arg);
 }

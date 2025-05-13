@@ -199,6 +199,8 @@ typedef struct {
     void* bss_end;                     // End of BSS segment
     size_t total_memory;               // Total memory used by process
     char* interpreter_path;            // Dynamic interpreter path (if any)
+    bool is_pie;                       // Whether this is a Position Independent Executable
+    uint64_t load_bias;                // Load bias for PIE (ASLR offset)
 } elf_process_info_t;
 
 // Function to validate an ELF header

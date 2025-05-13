@@ -19,6 +19,15 @@
 #define CAP_SYS_ADMIN          0x00000100  // Perform system administration
 #define CAP_SYS_BOOT           0x00000200  // Reboot/shutdown the system
 #define CAP_SYS_CHROOT         0x00000400  // Use chroot()
+
+/**
+ * Privilege levels for security operations
+ */
+#define PRIV_NONE              0x00000000  // No special privileges
+#define PRIV_USER              0x00000001  // Normal user privileges
+#define PRIV_SYSTEM_SERVICE    0x00000002  // System service privileges
+#define PRIV_SECURITY_ADMIN    0x00000004  // Security administration privileges
+#define PRIV_KERNEL            0x00000008  // Kernel-level privileges
 #define CAP_SYS_MODULE         0x00000800  // Load/unload kernel modules
 #define CAP_SYS_NICE           0x00001000  // Override scheduling restrictions
 #define CAP_SYS_RESOURCE       0x00002000  // Override resource limits
@@ -399,5 +408,13 @@ bool security_check_memory_access(struct task* task, void* addr, size_t size, bo
  * @return true if permission is granted, false otherwise
  */
 bool security_check_signal_permission(struct task* sender, struct task* recipient, int signal);
+
+/**
+ * Check if the current task has a specific privilege level
+ *
+ * @param privilege_level Privilege level to check for
+ * @return true if the current task has the specified privilege, false otherwise
+ */
+bool security_check_privilege(uint32_t privilege_level);
 
 #endif /* SECURITY_H */

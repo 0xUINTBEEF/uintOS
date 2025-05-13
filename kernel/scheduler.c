@@ -3,6 +3,8 @@
 #include "sync.h"
 #include "logging/log.h"
 #include "../memory/heap.h"
+#include "../memory/vmm.h"
+#include "../memory/aslr.h"
 #include "lapic.h"
 #include <string.h>
 
@@ -900,13 +902,15 @@ int scheduler_terminate_task(int task_id, int exit_code) {
         spinlock_release(&scheduler.lock);
         return -1; // Task not found
     }
-    
-    // Update task state and exit code
+      // Update task state and exit code
     task->state = TASK_STATE_ZOMBIE;
     task->exit_code = exit_code;
     
     // Remove task from any scheduler queues
     scheduler_remove_task_from_ready_queue(task_id);
+    
+    // Clean up process address space (ASLR)
+    vmm_destroy_process_space(task_id);
     
     // Check if any parents are waiting for this task
     scheduler_check_waiting_parents(task_id, exit_code);

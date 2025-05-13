@@ -20,5 +20,6 @@ int64_t secure_sys_write(syscall_args_t *args);
 int64_t secure_sys_open(syscall_args_t *args);
 int64_t secure_sys_execve(syscall_args_t *args);
 int64_t secure_sys_mmap(syscall_args_t *args);
+int64_t sys_aslr_control_handler(syscall_args_t* args);
 
 #endif // SYSCALL_WRAPPERS_H
